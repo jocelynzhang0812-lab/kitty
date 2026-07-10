@@ -354,6 +354,7 @@ def create_app() -> KittyASGIApp:
         encrypt_key=settings.feishu_encrypt_key,
         require_mention=settings.feishu_require_mention,
         max_clock_skew_seconds=settings.feishu_max_clock_skew_seconds,
+        accept_images=settings.feishu_accept_images,
     )
     sender = (
         FeishuSender(

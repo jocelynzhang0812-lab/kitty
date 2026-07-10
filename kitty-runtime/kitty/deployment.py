@@ -35,6 +35,7 @@ class DeploymentSettings:
     feishu_verification_token: str = field(default="", repr=False)
     feishu_encrypt_key: str = field(default="", repr=False)
     feishu_require_mention: bool = True
+    feishu_accept_images: bool = False
     feishu_max_clock_skew_seconds: int = 300
     debug_api_token: str = field(default="", repr=False)
     delivery_max_attempts: int = 5
@@ -63,6 +64,7 @@ class DeploymentSettings:
             feishu_verification_token=os.getenv("FEISHU_VERIFICATION_TOKEN", ""),
             feishu_encrypt_key=os.getenv("FEISHU_ENCRYPT_KEY", ""),
             feishu_require_mention=os.getenv("FEISHU_REQUIRE_MENTION", "1") != "0",
+            feishu_accept_images=os.getenv("FEISHU_ACCEPT_IMAGES", "0") == "1",
             feishu_max_clock_skew_seconds=int(
                 os.getenv("FEISHU_MAX_CLOCK_SKEW_SECONDS", "300")
             ),
