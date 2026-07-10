@@ -30,6 +30,7 @@ flowchart TD
 - SQLite 会话历史、事件去重、投递状态和死信重放；
 - 飞书发送限速和稳定 `uuid`，避免网络重试重复回复；
 - 交互式消息卡片：卡片构建器（文本/按钮/下拉）、`card.action.trigger` 回调走同一条持久投递链路、表情回应与卡片原地更新；
+- 图片消息：`FEISHU_ACCEPT_IMAGES=1` 开启接收（`image_key` 暴露给工具/Hook），支持资源下载、图片上传与发送；
 - `/health`、`/ready`、生产配置校验和 Docker 部署。
 
 ## 快速开始

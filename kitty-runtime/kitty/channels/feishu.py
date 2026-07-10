@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
@@ -42,6 +43,7 @@ class FeishuEventParser:
         encrypt_key: str = "",
         dedupe: Callable[[str], bool] | None = None,
         max_clock_skew_seconds: int = 300,
+        accept_images: bool = False,
     ):
         self.require_mention = require_mention
         self.dedupe_size = dedupe_size
@@ -49,6 +51,7 @@ class FeishuEventParser:
         self.encrypt_key = encrypt_key
         self.dedupe = dedupe
         self.max_clock_skew_seconds = max_clock_skew_seconds
+        self.accept_images = accept_images
         self._seen_order: deque[str] = deque()
         self._seen: set[str] = set()
 
@@ -126,6 +129,21 @@ class FeishuEventParser:
             meta=meta,
         )
         message_type = str(message.get("message_type") or "")
+        if message_type == "image" and self.accept_images:
+            try:
+                image_content = json.loads(message.get("content") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                return None
+            image_key = str(image_content.get("image_key") or "")
+            if not image_key:
+                return None
+            record.meta.extra.update({"kind": "image", "image_key": image_key})
+            return ChannelMessage(
+                session_id=session_id,
+                content="[用户发送了一张图片]",
+                request_id=message_id or None,
+                record=record,
+            )
         if message_type != "text":
             return UnsupportedFeishuMessage(
                 session_id=session_id,
@@ -278,6 +296,14 @@ class FeishuEventParser:
 # (url, headers, payload, method) -> parsed JSON response
 JsonTransport = Callable[[str, dict[str, str], dict[str, Any], str], dict[str, Any]]
 
+# (url, headers) -> raw response bytes (used for resource downloads)
+BinaryTransport = Callable[[str, dict[str, str]], bytes]
+
+# (url, headers, fields, file_field, file_name, file_bytes) -> parsed JSON
+UploadTransport = Callable[
+    [str, dict[str, str], dict[str, str], str, str, bytes], dict[str, Any]
+]
+
 
 class FeishuSender:
     """Dependency-free Feishu sender: text, cards, reactions, card updates."""
@@ -288,6 +314,8 @@ class FeishuSender:
         app_id: str,
         app_secret: str,
         transport: JsonTransport | None = None,
+        binary_transport: BinaryTransport | None = None,
+        upload_transport: UploadTransport | None = None,
         timeout_seconds: float = 10.0,
         min_send_interval_seconds: float = 0.21,
     ):
@@ -297,6 +325,8 @@ class FeishuSender:
         self.app_secret = app_secret
         self.timeout_seconds = timeout_seconds
         self.transport = transport or self._post_json
+        self.binary_transport = binary_transport or self._get_binary
+        self.upload_transport = upload_transport or self._post_multipart
         self.min_send_interval_seconds = max(0.0, min_send_interval_seconds)
         self._token = ""
         self._token_expires_at = 0.0
@@ -354,6 +384,46 @@ class FeishuSender:
         import asyncio
 
         return await asyncio.to_thread(self._add_reaction_sync, message_id, emoji_type)
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_key: str,
+        request_uuid: str | None = None,
+    ) -> dict[str, Any]:
+        """Send an already-uploaded image by image_key."""
+
+        import asyncio
+
+        return await asyncio.to_thread(
+            self._send_message_sync, chat_id, "image", {"image_key": image_key}, request_uuid
+        )
+
+    async def download_resource(
+        self,
+        message_id: str,
+        file_key: str,
+        resource_type: str = "image",
+    ) -> bytes:
+        """Download a message attachment (user-sent image/file) as bytes.
+
+        Pairs with ``FeishuEventParser(accept_images=True)``: the parser
+        surfaces ``image_key`` in ``record.meta.extra`` and scenario tools
+        or hooks fetch the content here (for vision models, archiving, …).
+        """
+
+        import asyncio
+
+        return await asyncio.to_thread(
+            self._download_resource_sync, message_id, file_key, resource_type
+        )
+
+    async def upload_image(self, image_bytes: bytes) -> str:
+        """Upload image bytes; returns an image_key usable with send_image."""
+
+        import asyncio
+
+        return await asyncio.to_thread(self._upload_image_sync, image_bytes)
 
     def _send_message_sync(
         self,
@@ -414,6 +484,45 @@ class FeishuSender:
             )
         return result
 
+    def _download_resource_sync(
+        self,
+        message_id: str,
+        file_key: str,
+        resource_type: str,
+    ) -> bytes:
+        if not message_id or not file_key:
+            raise ValueError("message_id and file_key are required")
+        token = self._tenant_token()
+        url = (
+            "https://open.feishu.cn/open-apis/im/v1/messages/"
+            f"{message_id}/resources/{file_key}?type={resource_type}"
+        )
+        return self.binary_transport(url, {"Authorization": f"Bearer {token}"})
+
+    def _upload_image_sync(self, image_bytes: bytes) -> str:
+        if not image_bytes:
+            raise ValueError("image_bytes is empty")
+        token = self._tenant_token()
+        result = self.upload_transport(
+            "https://open.feishu.cn/open-apis/im/v1/images",
+            {"Authorization": f"Bearer {token}"},
+            {"image_type": "message"},
+            "image",
+            "image",
+            image_bytes,
+        )
+        if result.get("code") != 0:
+            with self._token_lock:
+                self._token = ""
+                self._token_expires_at = 0.0
+            raise RuntimeError(
+                f"Feishu upload image failed: code={result.get('code')} msg={result.get('msg')}"
+            )
+        image_key = str((result.get("data") or {}).get("image_key") or "")
+        if not image_key:
+            raise RuntimeError("Feishu upload image returned no image_key")
+        return image_key
+
     def _wait_for_send_slot(self, chat_id: str) -> None:
         if self.min_send_interval_seconds <= 0:
             return
@@ -459,6 +568,60 @@ class FeishuSender:
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method=method,
             headers={"Content-Type": "application/json", **headers},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:2000]
+            raise RuntimeError(f"Feishu HTTP {exc.code}: {detail}") from exc
+
+    def _get_binary(self, url: str, headers: dict[str, str]) -> bytes:
+        request = urllib.request.Request(url, method="GET", headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:2000]
+            raise RuntimeError(f"Feishu HTTP {exc.code}: {detail}") from exc
+
+    def _post_multipart(
+        self,
+        url: str,
+        headers: dict[str, str],
+        fields: dict[str, str],
+        file_field: str,
+        file_name: str,
+        file_bytes: bytes,
+    ) -> dict[str, Any]:
+        boundary = f"kitty-{uuid.uuid4().hex}"
+        parts: list[bytes] = []
+        for key, value in fields.items():
+            parts.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                    f"{value}\r\n"
+                ).encode("utf-8")
+            )
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{file_field}"; filename="{file_name}"\r\n'
+                "Content-Type: application/octet-stream\r\n\r\n"
+            ).encode("utf-8")
+        )
+        parts.append(file_bytes)
+        parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(parts)
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                **headers,
+            },
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
