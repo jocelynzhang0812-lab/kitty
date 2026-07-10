@@ -23,6 +23,10 @@ class DeploymentSettings:
     model_api_key: str = field(default="", repr=False)
     model_base_url: str = "https://api.moonshot.cn/v1"
     model_name: str = "kimi-latest"
+    model_timeout_seconds: float = 120.0
+    model_max_retries: int = 2
+    cs_tool_timeout_seconds: float = 30.0
+    cs_feedback_timeout_seconds: float = 15.0
     feishu_app_id: str = ""
     feishu_app_secret: str = field(default="", repr=False)
     feishu_verification_token: str = field(default="", repr=False)
@@ -30,6 +34,8 @@ class DeploymentSettings:
     feishu_require_mention: bool = True
     feishu_max_clock_skew_seconds: int = 300
     debug_api_token: str = field(default="", repr=False)
+    delivery_max_attempts: int = 5
+    delivery_retry_base_seconds: float = 1.0
     bitable_app_token: str = field(default="", repr=False)
     bitable_table_id: str = field(default="", repr=False)
     internal_debug_chat_id: str = ""
@@ -54,6 +60,12 @@ class DeploymentSettings:
             model_base_url=os.getenv("LLM_BASE_URL")
             or os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1"),
             model_name=os.getenv("LLM_MODEL") or os.getenv("KIMI_MODEL", "kimi-latest"),
+            model_timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
+            model_max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
+            cs_tool_timeout_seconds=float(os.getenv("CS_TOOL_TIMEOUT_SECONDS", "30")),
+            cs_feedback_timeout_seconds=float(
+                os.getenv("CS_FEEDBACK_TIMEOUT_SECONDS", "15")
+            ),
             feishu_app_id=os.getenv("FEISHU_APP_ID", ""),
             feishu_app_secret=os.getenv("FEISHU_APP_SECRET", ""),
             feishu_verification_token=os.getenv("FEISHU_VERIFICATION_TOKEN", ""),
@@ -63,6 +75,10 @@ class DeploymentSettings:
                 os.getenv("FEISHU_MAX_CLOCK_SKEW_SECONDS", "300")
             ),
             debug_api_token=os.getenv("KITTY_DEBUG_API_TOKEN", ""),
+            delivery_max_attempts=int(os.getenv("KITTY_DELIVERY_MAX_ATTEMPTS", "5")),
+            delivery_retry_base_seconds=float(
+                os.getenv("KITTY_DELIVERY_RETRY_BASE_SECONDS", "1")
+            ),
             bitable_app_token=os.getenv("BITABLE_APP_TOKEN", ""),
             bitable_table_id=os.getenv("BITABLE_TABLE_ID", ""),
             internal_debug_chat_id=os.getenv("INTERNAL_DEBUG_CHAT_ID", ""),
@@ -80,6 +96,18 @@ class DeploymentSettings:
             errors.append("KITTY_MODEL_PROVIDER must be mock or openai_compatible")
         if self.feishu_max_clock_skew_seconds < 0:
             errors.append("FEISHU_MAX_CLOCK_SKEW_SECONDS cannot be negative")
+        if self.delivery_max_attempts < 1:
+            errors.append("KITTY_DELIVERY_MAX_ATTEMPTS must be at least 1")
+        if self.delivery_retry_base_seconds <= 0:
+            errors.append("KITTY_DELIVERY_RETRY_BASE_SECONDS must be positive")
+        if self.model_timeout_seconds <= 0:
+            errors.append("LLM_TIMEOUT_SECONDS must be positive")
+        if self.model_max_retries < 0:
+            errors.append("LLM_MAX_RETRIES cannot be negative")
+        if self.cs_tool_timeout_seconds <= 0:
+            errors.append("CS_TOOL_TIMEOUT_SECONDS must be positive")
+        if self.cs_feedback_timeout_seconds <= 0:
+            errors.append("CS_FEEDBACK_TIMEOUT_SECONDS must be positive")
         if not self.project_root.is_dir():
             errors.append(f"KITTY_PROJECT_ROOT does not exist: {self.project_root}")
 
@@ -127,6 +155,7 @@ class DeploymentSettings:
             "bitable_configured": bool(self.bitable_app_token and self.bitable_table_id),
             "debug_api_enabled": self.environment != "production"
             or bool(self.debug_api_token),
+            "delivery_max_attempts": self.delivery_max_attempts,
         }
 
 

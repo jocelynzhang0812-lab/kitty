@@ -167,14 +167,20 @@ class FeishuSenderTests(unittest.IsolatedAsyncioTestCase):
                 return {"code": 0, "tenant_access_token": "token", "expire": 7200}
             return {"code": 0, "data": {"message_id": "om_reply"}}
 
-        sender = FeishuSender(app_id="app", app_secret="secret", transport=transport)
-        first = await sender.send_text("oc_1", "hello")
+        sender = FeishuSender(
+            app_id="app",
+            app_secret="secret",
+            transport=transport,
+            min_send_interval_seconds=0,
+        )
+        first = await sender.send_text("oc_1", "hello", "delivery-uuid")
         second = await sender.send_text("oc_1", "again")
 
         self.assertEqual(first["code"], 0)
         self.assertEqual(second["code"], 0)
         self.assertEqual(len(calls), 3)
         self.assertEqual(calls[1][1]["Authorization"], "Bearer token")
+        self.assertEqual(calls[1][2]["uuid"], "delivery-uuid")
 
 
 class ServerTests(unittest.IsolatedAsyncioTestCase):
@@ -271,3 +277,39 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertTrue(body["accepted"])
         self.assertEqual(replies, [("oc_1", "api:hello")])
+
+    async def test_durable_delivery_retries_without_rerunning_model(self):
+        calls = []
+
+        async def fallback_sender(chat_id, text):
+            raise AssertionError("idempotent sender should be used")
+
+        async def idempotent_sender(chat_id, text, request_uuid):
+            calls.append((chat_id, text, request_uuid))
+            if len(calls) == 1:
+                raise RuntimeError("temporary Feishu failure")
+
+        app = KittyASGIApp(
+            self.runtime,
+            feishu_parser=FeishuEventParser(),
+            reply_sender=fallback_sender,
+            idempotent_reply_sender=idempotent_sender,
+            delivery_retry_base_seconds=0.01,
+        )
+        status, body = await asgi_request(
+            app,
+            "POST",
+            "/feishu/events",
+            feishu_payload("durable-message"),
+        )
+        await asyncio.gather(*tuple(app._background_tasks))
+
+        job = self.runtime.store.load_feishu_job("durable-message")
+        session = self.runtime.store.load("oc_1")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["accepted"])
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.attempts, 2)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][2], calls[1][2])
+        self.assertEqual(len(session.messages), 2)

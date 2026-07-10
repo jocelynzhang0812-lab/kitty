@@ -8,6 +8,7 @@ from pathlib import Path
 
 from kitty.core.config import KittyConfig
 from kitty.core.context import AgentRecord, RecordMeta
+from kitty.memory.session_store import SQLiteSessionStore
 from kitty.runtime import KittyRuntime
 
 
@@ -18,11 +19,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hook", action="append", default=[], help="Python event hook to load")
     parser.add_argument("--json-events", action="store_true", help="Write runtime events as JSONL to stderr")
     parser.add_argument("--once", help="Process one message instead of opening an interactive prompt")
+    parser.add_argument(
+        "--delivery-status",
+        action="store_true",
+        help="Print durable Feishu delivery counts and exit",
+    )
+    parser.add_argument(
+        "--retry-delivery",
+        metavar="MESSAGE_ID",
+        help="Move one dead Feishu delivery back to pending and exit",
+    )
     return parser
 
 
 async def run_cli(args: argparse.Namespace) -> int:
     config = KittyConfig(state_dir=Path(args.state_dir))
+    if args.delivery_status or args.retry_delivery:
+        store = SQLiteSessionStore(config.session_db_path)
+        if args.delivery_status:
+            print(json.dumps(store.feishu_job_counts(), ensure_ascii=False))
+            return 0
+        requeued = store.requeue_dead_feishu_job(args.retry_delivery)
+        print(
+            json.dumps(
+                {"job_id": args.retry_delivery, "requeued": requeued},
+                ensure_ascii=False,
+            )
+        )
+        return 0 if requeued else 1
+
     runtime = KittyRuntime(config=config, project_root=Path.cwd())
 
     if args.json_events:

@@ -1,4 +1,5 @@
 """LLM Agent 编排器：系统提示词 + Function Calling 循环"""
+import asyncio
 import json
 import os
 import time
@@ -182,8 +183,20 @@ C. 产品不确定："抱歉，我暂时无法确定您咨询的是哪个 Kimi �
 class LLMClient:
     """封装 Kimi API（OpenAI-compatible）"""
 
-    def __init__(self, api_key: str, model: str = "kimi-latest", base_url: str = "https://api.moonshot.cn/v1"):
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "kimi-latest",
+        base_url: str = "https://api.moonshot.cn/v1",
+        timeout_seconds: float = 120.0,
+        max_retries: int = 2,
+    ):
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout_seconds,
+            max_retries=max_retries,
+        )
         self.model = model
 
     async def chat(self, messages: List[Dict], tools: Optional[List[Dict]] = None, temperature: float = 0.1):
@@ -490,14 +503,31 @@ class CSAgent:
                 print(f"[HumanHandoff] finally 兜底通知失败（非阻塞）: {e}")
 
             # ── 10. 通用反馈收集：每条消息强制入表 ──
-            await self._collect_feedback(
-                user_id=user_id,
-                session_id=session_id,
-                user_message=message,
-                bot_reply=final_reply,
-                kb_data=kb_data,
-                session_state=session_state,
-            )
+            try:
+                feedback_timeout = float(
+                    os.getenv("CS_FEEDBACK_TIMEOUT_SECONDS", "15")
+                )
+                await asyncio.wait_for(
+                    self._collect_feedback(
+                        user_id=user_id,
+                        session_id=session_id,
+                        user_message=message,
+                        bot_reply=final_reply,
+                        kb_data=kb_data,
+                        session_state=session_state,
+                    ),
+                    timeout=feedback_timeout,
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"[FeedbackCollector] 超时（不阻塞回复）: "
+                    f"timeout={feedback_timeout:g}s, session={session_id}"
+                )
+            except Exception as feedback_error:
+                print(
+                    f"[FeedbackCollector] 异常（不阻塞回复）: "
+                    f"{feedback_error}, session={session_id}"
+                )
 
     async def _run_loop(
         self,

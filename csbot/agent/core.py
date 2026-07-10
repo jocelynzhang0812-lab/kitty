@@ -1,3 +1,5 @@
+import asyncio
+import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass
@@ -65,9 +67,18 @@ class ToolRegistry:
             )
         try:
             start = time.time()
-            result = await tool_func(**kwargs)
+            timeout = float(os.getenv("CS_TOOL_TIMEOUT_SECONDS", "30"))
+            result = await asyncio.wait_for(tool_func(**kwargs), timeout=timeout)
             result.execution_time = time.time() - start
             return result
+        except asyncio.TimeoutError:
+            return ToolResult(
+                tool_name=name,
+                status=ToolStatus.FAILED,
+                result=None,
+                error_message=f"tool timed out after {timeout:g}s",
+                execution_time=time.time() - start,
+            )
         except Exception as e:
             return ToolResult(
                 tool_name=name,

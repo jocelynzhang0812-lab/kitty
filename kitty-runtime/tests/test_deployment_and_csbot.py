@@ -1,9 +1,16 @@
+import asyncio
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from csbot.agent.core import ToolRegistry, ToolResult, ToolStatus
 from kitty.core.config import KittyConfig
 from kitty.core.context import AgentRecord, RecordMeta
 from kitty.deployment import DeploymentConfigError, DeploymentSettings
@@ -58,6 +65,23 @@ class DeploymentSettingsTests(unittest.TestCase):
         self.assertIn("FEISHU_ENCRYPT_KEY", message)
         self.assertIn("BITABLE_APP_TOKEN", message)
         self.assertIn("mock model provider is forbidden", message)
+
+
+class CSBotToolTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_csbot_tool_timeout_returns_structured_failure(self):
+        async def slow_tool(**kwargs):
+            await asyncio.sleep(0.1)
+            return ToolResult("test_slow_tool", ToolStatus.SUCCESS, {})
+
+        ToolRegistry.register("test_slow_tool", slow_tool, "test")
+        try:
+            with patch.dict(os.environ, {"CS_TOOL_TIMEOUT_SECONDS": "0.01"}):
+                result = await ToolRegistry.execute_tool("test_slow_tool")
+        finally:
+            ToolRegistry._tools.pop("test_slow_tool", None)
+
+        self.assertEqual(result.status, ToolStatus.FAILED)
+        self.assertIn("timed out", result.error_message)
 
 
 class CSBotHandlerTests(unittest.IsolatedAsyncioTestCase):

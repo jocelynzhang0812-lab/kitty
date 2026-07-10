@@ -226,6 +226,7 @@ class FeishuSender:
         app_secret: str,
         transport: JsonTransport | None = None,
         timeout_seconds: float = 10.0,
+        min_send_interval_seconds: float = 0.21,
     ):
         if not app_id or not app_secret:
             raise ValueError("Feishu app_id and app_secret are required")
@@ -233,32 +234,70 @@ class FeishuSender:
         self.app_secret = app_secret
         self.timeout_seconds = timeout_seconds
         self.transport = transport or self._post_json
+        self.min_send_interval_seconds = max(0.0, min_send_interval_seconds)
         self._token = ""
         self._token_expires_at = 0.0
         self._token_lock = threading.Lock()
+        self._rate_lock = threading.Lock()
+        self._next_send_by_chat: dict[str, float] = {}
 
-    async def send_text(self, chat_id: str, text: str) -> dict[str, Any]:
+    async def send_text(
+        self,
+        chat_id: str,
+        text: str,
+        request_uuid: str | None = None,
+    ) -> dict[str, Any]:
         import asyncio
 
-        return await asyncio.to_thread(self._send_text_sync, chat_id, text)
+        return await asyncio.to_thread(
+            self._send_text_sync,
+            chat_id,
+            text,
+            request_uuid,
+        )
 
-    def _send_text_sync(self, chat_id: str, text: str) -> dict[str, Any]:
+    def _send_text_sync(
+        self,
+        chat_id: str,
+        text: str,
+        request_uuid: str | None = None,
+    ) -> dict[str, Any]:
         if not chat_id:
             raise ValueError("chat_id is required")
         token = self._tenant_token()
+        self._wait_for_send_slot(chat_id)
         url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
+        payload = {
+            "receive_id": chat_id,
+            "msg_type": "text",
+            "content": json.dumps({"text": text}, ensure_ascii=False),
+        }
+        if request_uuid:
+            payload["uuid"] = request_uuid[:50]
         result = self.transport(
             url,
             {"Authorization": f"Bearer {token}"},
-            {
-                "receive_id": chat_id,
-                "msg_type": "text",
-                "content": json.dumps({"text": text}, ensure_ascii=False),
-            },
+            payload,
         )
         if result.get("code") != 0:
+            # A stale/invalid token is one common source of API-level errors.
+            # Clearing it is safe and lets the durable retry fetch a fresh one.
+            with self._token_lock:
+                self._token = ""
+                self._token_expires_at = 0.0
             raise RuntimeError(f"Feishu send failed: code={result.get('code')} msg={result.get('msg')}")
         return result
+
+    def _wait_for_send_slot(self, chat_id: str) -> None:
+        if self.min_send_interval_seconds <= 0:
+            return
+        now = time.monotonic()
+        with self._rate_lock:
+            slot = max(now, self._next_send_by_chat.get(chat_id, now))
+            self._next_send_by_chat[chat_id] = slot + self.min_send_interval_seconds
+        delay = slot - now
+        if delay > 0:
+            time.sleep(delay)
 
     def _tenant_token(self) -> str:
         now = time.time()

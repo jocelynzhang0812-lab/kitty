@@ -158,6 +158,8 @@ async def bootstrap(project_root: str | Path | None = None) -> CSAgent:
         model=os.getenv("LLM_MODEL") or os.getenv("KIMI_MODEL", "kimi-latest"),
         base_url=os.getenv("LLM_BASE_URL")
         or os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1"),
+        timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
+        max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
     )
 
     # 5. Agent

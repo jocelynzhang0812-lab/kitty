@@ -149,6 +149,24 @@ class SessionWorker:
         user_id = request.record.effective_user_id()
         try:
             state = await asyncio.to_thread(self.store.load, self.session_id)
+            if (
+                state.metadata.get("last_request_id") == request.request_id
+                and "last_reply" in state.metadata
+            ):
+                self.logger.info(
+                    "returning cached result request_id=%s",
+                    request.request_id,
+                )
+                if not request.future.done():
+                    request.future.set_result(
+                        WorkerResult(
+                            request_id=request.request_id,
+                            session_id=self.session_id,
+                            reply=str(state.metadata.get("last_reply") or ""),
+                            steps=int(state.metadata.get("last_steps") or 0),
+                        )
+                    )
+                return
             await self._emit(
                 SessionEvent.wire(
                     self.session_id,
@@ -184,6 +202,8 @@ class SessionWorker:
                 {
                     "last_request_id": request.request_id,
                     "last_user_id": user_id,
+                    "last_reply": result.reply,
+                    "last_steps": result.steps,
                 }
             )
             await asyncio.to_thread(self.store.save, state)

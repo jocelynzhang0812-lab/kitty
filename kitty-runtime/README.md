@@ -6,6 +6,8 @@
 
 - 每个会话独立串行队列，不同会话可并发处理；
 - SQLite 持久化会话历史和飞书 `message_id` 去重；
+- 飞书回调先持久化任务再确认，失败指数退避重试，重启后继续投递；
+- 回复发送使用飞书 `uuid` 幂等键，避免重试产生重复消息；
 - 启动时自动加载 CS-bot、16 个业务工具和本地知识库；
 - 自动恢复 CS-bot 的上下文历史；
 - 支持 OpenAI-compatible 模型接口，也保留本地 mock 模式；
@@ -59,6 +61,15 @@ https://你的域名/feishu/events
 - `POST /v1/messages`：内部调试接口；生产环境默认关闭，设置独立的 `KITTY_DEBUG_API_TOKEN` 后才启用。
 
 生产环境会在进程启动阶段校验必需配置。缺少飞书密钥、模型密钥、多维表配置或内部通知 ID 时会直接启动失败，避免以半可用状态上线。
+
+`/ready` 的 `delivery` 字段会展示 `pending`、`processing`、`completed` 和 `dead` 数量。查看或重放失败任务：
+
+```bash
+kitty --state-dir /data/kitty --delivery-status
+kitty --state-dir /data/kitty --retry-delivery om_xxx
+```
+
+重放后重启服务，启动恢复器会继续处理该任务。
 
 ## Docker
 

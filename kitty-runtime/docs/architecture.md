@@ -6,6 +6,7 @@
 Feishu HTTPS webhook
     -> signature / AES / token / dedupe
     -> KittyASGIApp
+        -> durable Feishu delivery queue (SQLite)
         -> WorkerManager
             -> SessionWorker (per-session serialized queue)
                 -> CSBotTurnHandler
@@ -16,6 +17,7 @@ Feishu HTTPS webhook
                 -> HookBus
                 -> SQLiteSessionStore
         -> FeishuSender
+            -> per-chat rate pacing / idempotent uuid
 ```
 
 ## 组件职责
@@ -26,6 +28,7 @@ Feishu HTTPS webhook
 - `SessionWorker`：同一会话严格串行，发布 turn 生命周期事件；
 - `CSBotTurnHandler`：启动真实 CS-bot、检查知识库、恢复上下文并执行消息；
 - `SQLiteSessionStore`：持久化消息和飞书 `message_id` 幂等记录；
+- `kitty_feishu_jobs`：在 HTTP 确认前保存待处理消息、回复和重试状态；
 - `HookBus`：隔离 hook 超时与异常；
 - `FeishuSender`：获取 tenant access token 并代表机器人发消息。
 
@@ -37,6 +40,7 @@ Feishu HTTPS webhook
 - 模型和飞书密钥由部署平台注入；
 - `/health` 只说明进程存活，流量切换应以 `/ready` 为准；
 - 任一生产必需配置或 CS-bot 知识库初始化失败时，进程启动失败。
+- 飞书投递采用指数退避，超过最大次数进入 `dead`，不会用重启循环掩盖永久错误。
 
 ## 兼容依据与未知项
 

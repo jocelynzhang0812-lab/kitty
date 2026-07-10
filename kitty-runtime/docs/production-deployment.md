@@ -16,6 +16,8 @@
 
 群聊默认只响应 @ 机器人；单聊直接响应。飞书可能重复投递同一消息，服务按 `message_id` 持久化去重。
 
+发送端会按会话节流，并为每条回复附带稳定 `uuid`。飞书官方说明相同 `uuid` 在一小时内最多成功发送一次，因此网络错误重试不会重复刷屏。
+
 官方参考：
 
 - [订阅方式与开发者服务器](https://open.feishu.cn/document/event-subscription-guide/event-subscriptions/event-subscription-configure-/choose-a-subscription-mode/send-notifications-to-developers-server?lang=zh-CN)
@@ -61,6 +63,17 @@ cp kitty-runtime/.env.production.example .env.production
 - 多维表：`BITABLE_APP_TOKEN`、`BITABLE_TABLE_ID`；
 - 内部通知：`INTERNAL_DEBUG_CHAT_ID`、`FEEDBACK_BOT_USER_ID`。
 
+可靠性参数已有安全默认值，通常不需要修改：
+
+```text
+LLM_TIMEOUT_SECONDS=120
+LLM_MAX_RETRIES=2
+CS_TOOL_TIMEOUT_SECONDS=30
+CS_FEEDBACK_TIMEOUT_SECONDS=15
+KITTY_DELIVERY_MAX_ATTEMPTS=5
+KITTY_DELIVERY_RETRY_BASE_SECONDS=1
+```
+
 不要把 `.env.production` 提交到 Git。模板里的 `replace-me` 只用于说明，不能用于生产。
 
 ## 4. Docker 部署
@@ -89,6 +102,16 @@ docker run -d --name cs-bot-kitty \
 - 限制请求体大小，应用默认上限是 1 MiB；
 - 生产环境默认关闭 `/v1/messages`。只有设置独立的 `KITTY_DEBUG_API_TOKEN` 后才启用，并要求 `Authorization: Bearer <token>` 或 `X-Kitty-API-Token`；即使启用，也建议在网关层限制为内网访问。
 
+`/ready` 会返回投递队列统计。监控应在 `dead > 0` 时告警；这类任务通常意味着飞书权限、目标群、应用发布状态或凭据存在永久错误。
+
+查看和重放失败任务：
+
+```bash
+docker exec cs-bot-kitty kitty --state-dir /data/kitty --delivery-status
+docker exec cs-bot-kitty kitty --state-dir /data/kitty --retry-delivery om_xxx
+docker restart cs-bot-kitty
+```
+
 ## 6. 上线验收
 
 按顺序验证：
@@ -103,5 +126,6 @@ docker run -d --name cs-bot-kitty \
 8. 提交一条反馈，确认多维表字段正确；
 9. 重启容器后继续对话，确认历史和去重记录仍存在；
 10. 检查日志中没有密钥、完整 token 或用户敏感内容泄漏。
+11. 临时让飞书发送失败一次，确认任务自动重试且群里只出现一条回复。
 
 完成这些检查后，才建议把机器人加入正式群聊。
