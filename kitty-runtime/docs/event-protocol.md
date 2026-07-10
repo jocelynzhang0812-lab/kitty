@@ -1,4 +1,4 @@
-# Kitty 兼容事件协议 v0.2
+# Kitty 事件协议 v1
 
 每个内部事件包含：
 
@@ -14,42 +14,30 @@
 
 ## Turn 生命周期
 
-正常顺序为：
-
-1. `worker.started`，worker 首次启动；
+1. `worker.started`；
 2. `cli.wire` / `TurnBegin`；
-3. 零个或多个 `TextPart`、`ToolCall`、`ToolResult` 或 `ContentPart`；
+3. 零个或多个 `TextPart`、`ToolCall`、`ToolResult`、`ContentPart`；
 4. `cli.wire` / `TurnEnd`；
 5. `cli.turn_done`；
-6. `worker.stopped`，worker 关闭。
+6. `worker.stopped`。
 
-`TurnBegin` 保留现有 CS-bot hook 使用的数据结构：
+Hook 接收 `event` 和 `ctx`：
 
-```json
-{
-  "wire": {
-    "wire_type": "TurnBegin",
-    "user_input": "hello",
-    "user_id": "ou_example",
-    "request_id": "request-id"
-  }
-}
-```
+- `event.event_type`、`event.session_id`、`event.data`；
+- `ctx.record`、`ctx.work_dir`、`ctx.session_id`、`ctx.logger`。
 
-## 飞书入口安全
+## 飞书入口
 
-`POST /feishu/events` 在解析业务 JSON 前依次执行：
+`POST /feishu/events` 按顺序执行：
 
-1. 使用时间戳、nonce、Encrypt Key 和原始请求体计算 SHA-256 签名；
-2. 使用常量时间比较校验 `X-Lark-Signature`；
-3. 拒绝超过允许时间偏差的请求，默认 300 秒；
-4. 使用 `SHA256(Encrypt Key)` 作为 AES-256-CBC 密钥解密 `encrypt` 字段；
-5. 校验 PKCS#7 padding 和 Verification Token；
-6. 使用飞书 `message_id` 创建持久化投递任务并做幂等去重。
+1. 使用原始请求体校验 `X-Lark-Signature`；
+2. 拒绝超过允许时钟偏差的请求；
+3. 使用 `SHA256(Encrypt Key)` 解密 AES-256-CBC payload；
+4. 校验 PKCS#7 padding 和 Verification Token；
+5. 解析文字、单聊/群聊和 @ 规则；
+6. 使用 `message_id` 创建持久化投递任务。
 
-## 持久化投递
-
-收到有效消息后，服务先把原始业务字段写入 `kitty_feishu_jobs`，提交成功后才向飞书返回确认。任务状态为：
+## 投递状态
 
 ```text
 pending -> processing -> completed
@@ -57,16 +45,11 @@ pending -> processing -> completed
                       -> dead
 ```
 
-模型回复在发送前保存，因此发送失败只会重试飞书调用，不会再次执行模型或业务工具。每个任务使用由 `message_id` 派生且稳定的飞书 `uuid`；官方接口保证相同 `uuid` 在一小时内最多成功发送一次。
-
-默认最多重试 5 次，退避从 1 秒开始，上限 300 秒。进程关闭时未完成任务会回到 `pending`，下次启动恢复。`dead` 任务可由管理命令重新排队。
-
-单聊文字消息不要求 @；群聊默认只响应明确 @ 机器人的消息。可用 `FEISHU_REQUIRE_MENTION=0` 放宽群聊规则，但不建议为公开群默认关闭。
+模型回复在发送前保存，发送重试使用由 `message_id` 派生的稳定飞书 `uuid`。任务失败按指数退避重试，服务重启会恢复 `pending` 和中断的 `processing` 任务。
 
 ## 失败语义
 
-- hook 失败会被记录，但不终止当前 turn；
-- 模型或 worker 失败只影响当前请求，worker 可继续接收后续请求；
-- 工具错误以结构化结果返回给模型，不穿透 worker 边界；
-- 飞书回调先落盘再快速确认，模型处理和回复在持久化后台任务中完成；
-- 服务关闭会等待后台任务最多 10 秒，然后取消仍未完成的任务。
+- Hook 和工具失败被隔离在当前调用；
+- 模型失败只重试当前持久化任务；
+- 同一 `request_id` 的已完成 turn 返回缓存结果；
+- 关闭时等待后台投递，超时任务回到 `pending`。

@@ -1,66 +1,92 @@
 # Kitty
 
-Kitty 提供会话 worker、模型编排、工具与 hook、持久化记忆，以及可真实部署的飞书消息链路。
+Kitty 是一个通用、可部署的飞书 AI 机器人运行时，不绑定任何具体业务。
+
+它负责飞书事件安全、会话并发、模型调用、工具扩展、Hook、持久化投递和运维；你的机器人业务通过系统提示词、工具模块、Skills 和 Hooks 注入。
 
 ## 架构
 
 ```mermaid
 flowchart TD
-    FS["飞书 HTTPS Webhook"] --> SEC["签名校验 · AES 解密 · Token 校验"]
+    FS["飞书 HTTPS Webhook"] --> SEC["签名 · AES 解密 · Token 校验"]
     SEC --> QUEUE["SQLite 持久化投递队列"]
     QUEUE --> WM["WorkerManager"]
-    WM --> SW["SessionWorker<br/>同会话串行，不同会话并发"]
-    SW --> AGENT["CSBotTurnHandler / AgentLoop"]
-    AGENT --> MODEL["OpenAI-compatible Model"]
-    AGENT --> TOOLS["业务工具与知识库"]
+    WM --> SW["SessionWorker<br/>同会话串行 · 不同会话并发"]
+    SW --> LOOP["AgentLoop"]
+    LOOP --> MODEL["OpenAI-compatible Model"]
+    LOOP --> TOOLS["自定义 Tools"]
+    LOOP --> SKILLS["SKILL.md"]
     SW --> HOOKS["HookBus"]
     SW --> MEMORY["SQLite 会话记忆"]
-    AGENT --> SEND["FeishuSender"]
-    SEND --> IDEM["限速 · UUID 幂等发送"]
+    LOOP --> SEND["FeishuSender<br/>限速 · UUID 幂等"]
 ```
 
 ## 核心能力
 
-- 每个会话独立串行 worker，不同会话并发执行；
-- SQLite 持久化会话、消息幂等记录和飞书投递任务；
 - 飞书请求签名、AES-256-CBC 解密和 Verification Token 校验；
-- 回调先落盘再确认，失败指数退避，服务重启后继续处理；
-- 使用飞书 `uuid` 防止网络重试产生重复回复；
-- OpenAI-compatible 模型接口和本地确定性 mock 模式；
-- 工具 allowlist、超时隔离和结构化错误；
-- `/health`、`/ready`、Docker 和生产配置强校验。
+- 回调先落盘再确认，失败指数退避，重启后恢复未完成任务；
+- 每个会话独立串行 worker，不同会话并发；
+- OpenAI-compatible Chat Completions 模型接口；
+- Python 工具模块、`SKILL.md` 和事件 Hook 扩展；
+- SQLite 会话历史、事件去重、投递状态和死信重放；
+- 飞书发送限速和稳定 `uuid`，避免网络重试重复回复；
+- `/health`、`/ready`、生产配置校验和 Docker 部署。
 
-## 仓库结构
-```text
-.
-├── kitty-runtime/       # Kitty 兼容运行时、飞书服务、测试与部署文件
-├── csbot/               # 参考业务 Agent：工具、知识库、SOP 和飞书集成
-├── cs_agent/            # CS-bot 的 SQLite 数据辅助模块
-├── main.py              # 组装真实 CS-bot 的 bootstrap 入口
-├── AGENTS.md            # Agent 工作约束
-└── MEMORY.md            # 项目级长期上下文示例
-```
+## 快速开始
 
-## 本地运行
-Python 3.11 或更高版本
 ```bash
-cd kitty-runtime
+git clone https://github.com/jocelynzhang0812-lab/kitty.git
+cd kitty/kitty-runtime
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.lock
 .venv/bin/pip install --no-deps -e .
 .venv/bin/python -m kitty --once "hello"
 ```
-未配置模型密钥时，开发环境默认使用 mock provider，不会发起外部请求。
+
+开发环境未配置模型密钥时使用本地 mock provider，不会访问外部服务。
+
+## 扩展机器人能力
+
+工具模块只需导出同步函数 `register_tools(registry)`：
+
+```python
+from kitty.tools.registry import ToolRegistry
+
+
+def register_tools(registry: ToolRegistry) -> None:
+    registry.add(
+        "add",
+        lambda a, b: a + b,
+        description="Add two numbers.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "a": {"type": "number"},
+                "b": {"type": "number"},
+            },
+            "required": ["a", "b"],
+        },
+    )
+```
+
+生产环境通过逗号分隔的模块名加载：
+
+```text
+KITTY_TOOL_MODULES=examples.tools,my_bot.tools
+KITTY_HOOK_PATHS=examples/echo_hook.py,my_bot/audit_hook.py
+KITTY_SYSTEM_PROMPT=You are our internal Feishu assistant.
+```
 
 ## 飞书生产运行
+
 ```bash
 cp kitty-runtime/.env.production.example .env.production
-# 填入真实模型、飞书和多维表配置
-set -a
-source .env.production
-set +a
-kitty-runtime/.venv/bin/uvicorn kitty.server:create_app \
-  --factory --app-dir kitty-runtime --host 0.0.0.0 --port 8000
+# 填写真实模型和飞书应用配置
+docker build -t kitty -f kitty-runtime/Dockerfile .
+docker run --rm -p 8000:8000 \
+  --env-file .env.production \
+  -v kitty-data:/data/kitty \
+  kitty
 ```
 
 飞书事件订阅地址：
@@ -69,28 +95,26 @@ kitty-runtime/.venv/bin/uvicorn kitty.server:create_app \
 https://你的域名/feishu/events
 ```
 
-详细配置见 [飞书生产部署指南](kitty-runtime/docs/production-deployment.md)。
+完整步骤见[飞书生产部署指南](kitty-runtime/docs/production-deployment.md)。
 
-## Docker
-```bash
-docker build -t kitty -f kitty-runtime/Dockerfile .
-docker run --rm -p 8000:8000 \
-  --env-file .env.production \
-  -v kitty-data:/data/kitty \
-  kitty
+## 仓库结构
+
+```text
+.
+└── kitty-runtime/
+    ├── kitty/          # 运行时源码
+    ├── examples/       # 中性工具与 Hook 示例
+    ├── tests/          # 单元和集成测试
+    ├── docs/           # 架构、事件协议和部署指南
+    ├── Dockerfile
+    └── pyproject.toml
 ```
-当前持久化层为 SQLite，生产环境应保持单实例。横向扩容前需要将会话和投递队列迁移到共享存储。
 
 ## 测试
+
 ```bash
 cd kitty-runtime
 .venv/bin/python -m unittest discover -s tests -v
 ```
-当前测试覆盖 worker 并发、会话恢复、工具与 hook 隔离、飞书加密事件、持久化投递、失败重试、UUID 幂等发送和真实 CS-bot 启动。
 
-## 文档
-- [运行时详细说明](kitty-runtime/README.md)
-- [系统架构](kitty-runtime/docs/architecture.md)
-- [事件协议](kitty-runtime/docs/event-protocol.md)
-- [CS-bot 兼容边界](kitty-runtime/docs/csbot-compatibility.md)
-- [飞书生产部署](kitty-runtime/docs/production-deployment.md)
+当前 SQLite 部署模式面向单实例。需要横向扩容时，应把会话和投递队列替换为共享存储。

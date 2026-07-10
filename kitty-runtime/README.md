@@ -1,92 +1,63 @@
-# Kitty Runtime（CS-bot 飞书生产运行时）
+# Kitty Feishu Runtime
 
-## 当前能力
+Kitty Runtime 提供安全 Webhook、模型工具循环、会话 worker、持久化投递和通用扩展接口。
 
-- 每个会话独立串行队列，不同会话可并发处理；
-- SQLite 持久化会话历史和飞书 `message_id` 去重；
-- 飞书回调先持久化任务再确认，失败指数退避重试，重启后继续投递；
-- 回复发送使用飞书 `uuid` 幂等键，避免重试产生重复消息；
-- 启动时自动加载 CS-bot、16 个业务工具和本地知识库；
-- 自动恢复 CS-bot 的上下文历史；
-- 支持 OpenAI-compatible 模型接口，也保留本地 mock 模式；
-- 支持飞书 URL 校验、Verification Token、请求签名校验和 AES-256-CBC 解密；
-- 支持单聊文字消息、群聊 @ 机器人消息和主动回复；
-- 非文字消息返回固定引导语；
-- 提供存活探针 `/health` 和就绪探针 `/ready`；
-- 支持 Uvicorn 直接启动和 Docker 部署；
-- 支持 `cli.wire`、`cli.turn_done` 与现有反馈 hook。
+## 运行模式
+
+- 开发环境：没有 `LLM_API_KEY` 时自动使用 mock provider；
+- 生产环境：强制要求真实模型、飞书凭据、Verification Token 和 Encrypt Key；
+- 单聊直接响应；群聊默认仅响应 @ 机器人；
+- 非文字消息返回文字引导。
 
 ## 本地运行
 
-需要 Python 3.11 及以上版本。
 ```bash
-cd kitty-runtime
 python3 -m venv .venv
-.venv/bin/pip install -e .
-.venv/bin/python -m kitty --once "如何配置机器人？"
+.venv/bin/pip install -r requirements.lock
+.venv/bin/pip install --no-deps -e .
+.venv/bin/python -m kitty --once "hello"
 ```
-
-开发环境没有设置模型密钥时默认使用确定性的 mock 模型，不会发起外部请求。状态默认保存在 `kitty-runtime/.kitty/`。
 
 ## 生产启动
 
-从仓库根目录执行：
-
 ```bash
-cp kitty-runtime/.env.production.example .env.production
-# 填写 .env.production 中的真实密钥和资源 ID
+cp .env.production.example ../.env.production
 set -a
-source .env.production
+source ../.env.production
 set +a
-kitty-runtime/.venv/bin/uvicorn kitty.server:create_app \
-  --factory --app-dir kitty-runtime --host 0.0.0.0 --port 8000 --proxy-headers
+.venv/bin/uvicorn kitty.server:create_app --factory --host 0.0.0.0 --port 8000
 ```
-飞书事件订阅地址设置为：
-```text
-https://你的域名/feishu/events
-```
-完整的飞书权限、事件订阅、多维表字段、Docker 命令和上线验收步骤见 [生产部署指南](docs/production-deployment.md)。
 
-## HTTP 接口
+接口：
 
-- `GET /health`：进程存活检查；
-- `GET /ready`：CS-bot、知识库和运行时完成初始化后返回 200；
-- `POST /feishu/events`：飞书加密事件入口；
-- `POST /v1/messages`：内部调试接口；生产环境默认关闭，设置独立的 `KITTY_DEBUG_API_TOKEN` 后才启用。
+- `GET /health`：进程存活；
+- `GET /ready`：运行时和持久化投递状态；
+- `POST /feishu/events`：飞书事件入口；
+- `POST /v1/messages`：可选调试入口，生产默认关闭。
 
-生产环境会在进程启动阶段校验必需配置。缺少飞书密钥、模型密钥、多维表配置或内部通知 ID 时会直接启动失败，避免以半可用状态上线。
+## 扩展点
 
-`/ready` 的 `delivery` 字段会展示 `pending`、`processing`、`completed` 和 `dead` 数量。查看或重放失败任务：
+- `KITTY_SYSTEM_PROMPT`：机器人角色与回答规则；
+- `KITTY_TOOL_MODULES`：加载实现 `register_tools(registry)` 的 Python 模块；
+- `KITTY_HOOK_PATHS`：加载监听生命周期事件的 Python Hook；
+- `.agents/*/skills/*/SKILL.md`：按用户消息选择并注入 Skills；
+- `AGENTS.md` / `MEMORY.md`：从 `KITTY_PROJECT_ROOT` 只读加载项目上下文。
+
+中性示例位于 `examples/tools.py` 和 `examples/echo_hook.py`。
+
+## 持久化投递
+
+飞书消息在 HTTP 确认前写入 SQLite。模型回复也会在发送前保存；发送失败只重试飞书调用，不重复运行模型和工具。超过最大尝试次数的任务进入 `dead`：
 
 ```bash
 kitty --state-dir /data/kitty --delivery-status
 kitty --state-dir /data/kitty --retry-delivery om_xxx
 ```
 
-重放后重启服务，启动恢复器会继续处理该任务。
+重放后重启服务，启动恢复器会继续处理任务。
 
-## Docker
+## 文档
 
-从仓库根目录构建：
-
-```bash
-docker build -t cs-bot-kitty:local -f kitty-runtime/Dockerfile .
-docker run --rm -p 8000:8000 \
-  --env-file .env.production \
-  -v kitty-data:/data/kitty \
-  cs-bot-kitty:local
-```
-
-当前持久化层是 SQLite，因此生产部署默认使用单实例。要横向扩容，需要先把会话和事件去重迁移到共享存储。
-
-容器安装使用 `requirements.lock` 中经过测试的精确依赖版本；升级依赖后应重新运行完整测试和生产启动检查。
-
-## 测试
-```bash
-cd kitty-runtime
-.venv/bin/python -m unittest discover -s tests -v
-```
-## 兼容边界
-
-运行时实现的是从当前仓库可观察行为中推断出的兼容接口。原始 Kitty 是否使用远程队列、子进程、容器调度或独立授权系统仍然未知。Python hook 在运行时进程内执行，只应加载受信任代码。
-更多说明见 [架构](docs/architecture.md)、[事件协议](docs/event-protocol.md) 和 [CS-bot 接入](docs/csbot-compatibility.md)。
+- [系统架构](docs/architecture.md)
+- [事件协议](docs/event-protocol.md)
+- [飞书生产部署](docs/production-deployment.md)

@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 
 class EventType(StrEnum):
-    """Runtime event names inferred from the CS-bot hook contract."""
+    """Runtime lifecycle event names exposed to hooks and adapters."""
 
     CLI_WIRE = "cli.wire"
     CLI_TURN_DONE = "cli.turn_done"

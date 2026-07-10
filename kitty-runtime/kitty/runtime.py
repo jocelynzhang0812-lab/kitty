@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 import asyncio
 import inspect
-from typing import Any
 
 from kitty.agent.handler import TurnHandler
 from kitty.agent.loop import AgentLoop
@@ -88,9 +87,6 @@ class KittyRuntime:
         loaded = load_hook(path, self.hooks)
         self.loaded_hooks.append(loaded)
         return loaded
-
-    def import_csbot_tools(self, registry: Any) -> int:
-        return self.tools.import_csbot_registry(registry)
 
     async def dispatch(
         self,

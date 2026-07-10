@@ -131,30 +131,6 @@ class ToolRegistry:
         except Exception as exc:
             return ToolExecution(name=name, ok=False, error=f"{type(exc).__name__}: {exc}")
 
-    def import_csbot_registry(self, csbot_registry: Any) -> int:
-        """Import tools from CS-bot's observable ``ToolRegistry`` contract."""
-
-        imported = 0
-        for name, info in csbot_registry.get_all_tools().items():
-            if name in self._tools:
-                continue
-            instance = info.get("instance")
-            handler = info.get("function")
-            if not callable(handler):
-                continue
-            schema: dict[str, Any] = {}
-            if instance is not None and hasattr(instance, "to_openai_schema"):
-                raw_schema = instance.to_openai_schema()
-                schema = raw_schema.get("function", {}).get("parameters", {})
-            self.add(
-                name,
-                handler,
-                description=str(info.get("description") or ""),
-                parameters=schema or {"type": "object", "properties": {}},
-            )
-            imported += 1
-        return imported
-
     @staticmethod
     def _validate(spec: ToolSpec, arguments: Mapping[str, Any]) -> str:
         required = spec.parameters.get("required", [])

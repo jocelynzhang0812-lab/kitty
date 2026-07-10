@@ -2,9 +2,8 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    KITTY_PROJECT_ROOT=/app \
-    KITTY_STATE_DIR=/data/kitty \
-    CS_DB_PATH=/data/kitty/cs_agent.db
+    KITTY_PROJECT_ROOT=/app/kitty-runtime \
+    KITTY_STATE_DIR=/data/kitty
 
 WORKDIR /app
 

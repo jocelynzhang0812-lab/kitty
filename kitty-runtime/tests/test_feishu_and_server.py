@@ -30,8 +30,8 @@ def feishu_payload(message_id="om_1", message_type="text", mentions=True):
                 "message_id": message_id,
                 "chat_id": "oc_1",
                 "message_type": message_type,
-                "content": json.dumps({"text": "@CS Bot hello"}),
-                "mentions": [{"name": "CS Bot"}] if mentions else [],
+                "content": json.dumps({"text": "@Kitty Bot hello"}),
+                "mentions": [{"name": "Kitty Bot"}] if mentions else [],
             },
         },
     }

@@ -1,8 +1,4 @@
-"""Clean-room Kitty-compatible agent runtime.
-
-The package implements only the contracts observable from the CS-bot
-repository.  It is not the original Kitty implementation.
-"""
+"""Kitty: a production-oriented Feishu bot runtime."""
 
 from kitty.core.config import KittyConfig
 from kitty.core.context import AgentRecord, HookContext, RecordMeta
@@ -20,4 +16,4 @@ __all__ = [
     "WireType",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
