@@ -89,6 +89,9 @@ class FeishuEventParser:
         if isinstance(challenge, str):
             return FeishuChallenge(challenge)
 
+        if header.get("event_type") == "card.action.trigger":
+            return self._parse_card_action(payload, header)
+
         if header.get("event_type") != "im.message.receive_v1":
             return None
         event = payload.get("event") or {}
@@ -149,6 +152,65 @@ class FeishuEventParser:
             session_id=session_id,
             content=text,
             request_id=message_id or None,
+            record=record,
+        )
+
+    def _parse_card_action(
+        self, payload: dict[str, Any], header: dict[str, Any]
+    ) -> ChannelMessage | None:
+        """Normalize a card button click / select into a ChannelMessage.
+
+        The synthetic ``content`` is what the agent sees; the structured
+        button ``value`` rides in ``record.meta.extra`` so hooks and
+        scenario code can route on it. Reusing ChannelMessage means card
+        actions flow through the same durable delivery queue as text
+        messages with zero extra plumbing.
+        """
+
+        event_id = str(header.get("event_id") or "")
+        if event_id and not self._accept_once(event_id):
+            return None
+        event = payload.get("event") or {}
+        operator = event.get("operator") or {}
+        action = event.get("action") or {}
+        context = event.get("context") or {}
+        user_id = str(operator.get("open_id") or operator.get("user_id") or "")
+        chat_id = str(context.get("open_chat_id") or "")
+        message_id = str(context.get("open_message_id") or "")
+        session_id = chat_id or user_id or event_id
+        value = action.get("value")
+        if not isinstance(value, dict):
+            value = {"value": value} if value is not None else {}
+        option = action.get("option")
+
+        if value.get("text"):
+            content = str(value["text"])
+        elif option:
+            content = f"[选择] {option}"
+        else:
+            content = "[卡片操作] " + json.dumps(value, ensure_ascii=False)
+
+        record = AgentRecord(
+            user_id=user_id,
+            from_user=user_id,
+            sender=user_id,
+            chat_id=chat_id,
+            meta=RecordMeta(
+                title="飞书卡片操作",
+                channel="feishu",
+                extra={
+                    "kind": "card_action",
+                    "card_value": value,
+                    "card_option": option,
+                    "message_id": message_id,
+                    "tag": str(action.get("tag") or ""),
+                },
+            ),
+        )
+        return ChannelMessage(
+            session_id=session_id,
+            content=content,
+            request_id=event_id or None,
             record=record,
         )
 
@@ -213,11 +275,12 @@ class FeishuEventParser:
         return payload
 
 
-JsonTransport = Callable[[str, dict[str, str], dict[str, Any]], dict[str, Any]]
+# (url, headers, payload, method) -> parsed JSON response
+JsonTransport = Callable[[str, dict[str, str], dict[str, Any], str], dict[str, Any]]
 
 
 class FeishuSender:
-    """Dependency-free Feishu text sender with tenant-token caching."""
+    """Dependency-free Feishu sender: text, cards, reactions, card updates."""
 
     def __init__(
         self,
@@ -262,22 +325,83 @@ class FeishuSender:
         text: str,
         request_uuid: str | None = None,
     ) -> dict[str, Any]:
+        return self._send_message_sync(chat_id, "text", {"text": text}, request_uuid)
+
+    async def send_card(
+        self,
+        chat_id: str,
+        card: dict[str, Any],
+        request_uuid: str | None = None,
+    ) -> dict[str, Any]:
+        """Send an interactive message card (see feishu_cards builders)."""
+
+        import asyncio
+
+        return await asyncio.to_thread(
+            self._send_message_sync, chat_id, "interactive", card, request_uuid
+        )
+
+    async def update_card(self, message_id: str, card: dict[str, Any]) -> dict[str, Any]:
+        """Replace a sent card's content in place (e.g. after a button click)."""
+
+        import asyncio
+
+        return await asyncio.to_thread(self._update_card_sync, message_id, card)
+
+    async def add_reaction(self, message_id: str, emoji_type: str) -> dict[str, Any]:
+        """Attach an emoji reaction, e.g. 'OnIt' (👀) or 'DONE' (✅)."""
+
+        import asyncio
+
+        return await asyncio.to_thread(self._add_reaction_sync, message_id, emoji_type)
+
+    def _send_message_sync(
+        self,
+        chat_id: str,
+        msg_type: str,
+        content: dict[str, Any],
+        request_uuid: str | None = None,
+    ) -> dict[str, Any]:
         if not chat_id:
             raise ValueError("chat_id is required")
-        token = self._tenant_token()
         self._wait_for_send_slot(chat_id)
         url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
         payload = {
             "receive_id": chat_id,
-            "msg_type": "text",
-            "content": json.dumps({"text": text}, ensure_ascii=False),
+            "msg_type": msg_type,
+            "content": json.dumps(content, ensure_ascii=False),
         }
         if request_uuid:
             payload["uuid"] = request_uuid[:50]
+        return self._api_call(url, payload, "POST", f"send {msg_type}")
+
+    def _update_card_sync(self, message_id: str, card: dict[str, Any]) -> dict[str, Any]:
+        if not message_id:
+            raise ValueError("message_id is required")
+        url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}"
+        payload = {"content": json.dumps(card, ensure_ascii=False)}
+        return self._api_call(url, payload, "PATCH", "update card")
+
+    def _add_reaction_sync(self, message_id: str, emoji_type: str) -> dict[str, Any]:
+        if not message_id:
+            raise ValueError("message_id is required")
+        url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions"
+        payload = {"reaction_type": {"emoji_type": emoji_type}}
+        return self._api_call(url, payload, "POST", "add reaction")
+
+    def _api_call(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        method: str,
+        action: str,
+    ) -> dict[str, Any]:
+        token = self._tenant_token()
         result = self.transport(
             url,
             {"Authorization": f"Bearer {token}"},
             payload,
+            method,
         )
         if result.get("code") != 0:
             # A stale/invalid token is one common source of API-level errors.
@@ -285,7 +409,9 @@ class FeishuSender:
             with self._token_lock:
                 self._token = ""
                 self._token_expires_at = 0.0
-            raise RuntimeError(f"Feishu send failed: code={result.get('code')} msg={result.get('msg')}")
+            raise RuntimeError(
+                f"Feishu {action} failed: code={result.get('code')} msg={result.get('msg')}"
+            )
         return result
 
     def _wait_for_send_slot(self, chat_id: str) -> None:
@@ -311,6 +437,7 @@ class FeishuSender:
                 "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
                 {},
                 {"app_id": self.app_id, "app_secret": self.app_secret},
+                "POST",
             )
             if result.get("code") != 0 or not result.get("tenant_access_token"):
                 raise RuntimeError(
@@ -325,11 +452,12 @@ class FeishuSender:
         url: str,
         headers: dict[str, str],
         payload: dict[str, Any],
+        method: str = "POST",
     ) -> dict[str, Any]:
         request = urllib.request.Request(
             url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            method="POST",
+            method=method,
             headers={"Content-Type": "application/json", **headers},
         )
         try:

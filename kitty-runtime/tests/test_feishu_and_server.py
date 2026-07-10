@@ -161,7 +161,7 @@ class FeishuSenderTests(unittest.IsolatedAsyncioTestCase):
     async def test_gets_cached_token_and_sends_text(self):
         calls = []
 
-        def transport(url, headers, payload):
+        def transport(url, headers, payload, method="POST"):
             calls.append((url, headers, payload))
             if "tenant_access_token" in url:
                 return {"code": 0, "tenant_access_token": "token", "expire": 7200}
