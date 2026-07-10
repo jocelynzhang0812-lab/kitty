@@ -4,6 +4,7 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -42,8 +43,10 @@ from csbot.knowledge.kb_skill import KBSearchSkill
 from csbot.knowledge.embeddings import OpenAIEmbeddingProvider
 
 
-async def bootstrap() -> CSAgent:
+async def bootstrap(project_root: str | Path | None = None) -> CSAgent:
     """初始化所有组件，返回 Agent"""
+
+    root = Path(project_root or Path(__file__).resolve().parent).expanduser().resolve()
 
     # 0. 向量 Embedding Provider（可选）
     # 支持环境变量：EMBEDDING_API_KEY / EMBEDDING_BASE_URL / EMBEDDING_MODEL
@@ -61,8 +64,14 @@ async def bootstrap() -> CSAgent:
     # 1. 知识库（优先加载本地知识库，禁止无意义联网搜索）
     loader = KnowledgeLoader()
     index = KnowledgeIndex()
-    # 同时加载核心知识库目录和 知识库0501 目录
-    docs = loader.load_all("csbot/knowledge/data,知识库0501")
+    # 始终使用绝对路径，避免服务进程的工作目录影响知识库加载。
+    knowledge_dirs = [root / "csbot" / "knowledge" / "data"]
+    legacy_knowledge = root / "知识库0501"
+    if legacy_knowledge.is_dir():
+        knowledge_dirs.append(legacy_knowledge)
+    docs = loader.load_all(",".join(str(path) for path in knowledge_dirs))
+    if not docs:
+        raise RuntimeError(f"知识库为空，无法启动 CS Bot: {knowledge_dirs[0]}")
     index.add_batch(docs)
 
     # 若启用了向量检索，批量编码所有文档（启动时执行一次）
@@ -89,10 +98,13 @@ async def bootstrap() -> CSAgent:
 
     # 3. 基础设施（强制从环境变量读取，无 fallback）
     sessions = SessionStore()
-    # 支持从环境变量配置内部标识到飞书真实 ID 的映射
-    # 默认值已内置，环境变量可覆盖
-    chat_id_map = {"internal_debug_group": "oc_8438587abb22f822bdda0d6281637b47"}
-    user_id_map = {"feedback_bot": "ou_aff1ab05f24e06d9861faf58ff0b32f9"}
+    # 内部通知目标必须由部署环境显式提供，避免把测试环境 ID 带入生产。
+    chat_id_map = {}
+    user_id_map = {}
+    if os.getenv("INTERNAL_DEBUG_CHAT_ID"):
+        chat_id_map["internal_debug_group"] = os.getenv("INTERNAL_DEBUG_CHAT_ID")
+    if os.getenv("FEEDBACK_BOT_USER_ID"):
+        user_id_map["feedback_bot"] = os.getenv("FEEDBACK_BOT_USER_ID")
     if os.getenv("FEISHU_CHAT_ID_MAP"):
         try:
             chat_id_map.update(json.loads(os.getenv("FEISHU_CHAT_ID_MAP")))
@@ -142,8 +154,10 @@ async def bootstrap() -> CSAgent:
 
     # 4. LLM Client
     llm = LLMClient(
-        api_key=os.getenv("KIMI_API_KEY"),
-        model=os.getenv("KIMI_MODEL", "kimi-latest"),
+        api_key=os.getenv("LLM_API_KEY") or os.getenv("KIMI_API_KEY"),
+        model=os.getenv("LLM_MODEL") or os.getenv("KIMI_MODEL", "kimi-latest"),
+        base_url=os.getenv("LLM_BASE_URL")
+        or os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1"),
     )
 
     # 5. Agent

@@ -1,50 +1,45 @@
-# Inferred Kitty architecture
+# 推断出的 Kitty 架构
 
-This implementation treats Kitty as a host runtime and CS-bot as a domain
-agent installed on top of it.
+当前实现把 Kitty 作为宿主运行时，把 CS-bot 作为部署在其上的领域 Agent。
 
 ```text
-Channel adapter
-    -> WorkerManager
-        -> SessionWorker (serialized queue)
-            -> AgentLoop
-                -> ModelProvider
-                -> ToolRegistry
-                -> SkillCatalog
-            -> HookBus
-            -> SQLiteSessionStore
+Feishu HTTPS webhook
+    -> signature / AES / token / dedupe
+    -> KittyASGIApp
+        -> WorkerManager
+            -> SessionWorker (per-session serialized queue)
+                -> CSBotTurnHandler
+                    -> CSAgent
+                        -> Model client
+                        -> 16 business tools
+                        -> local knowledge index
+                -> HookBus
+                -> SQLiteSessionStore
+        -> FeishuSender
 ```
 
-## Confirmed compatibility evidence
+## 组件职责
 
-The CS-bot repository exposes these observable integration contracts:
+- `KittyASGIApp`：存活/就绪探针、飞书回调、调试 API、后台任务和优雅关闭；
+- `FeishuEventParser`：签名、时钟偏差、AES 解密、token、消息类型、@ 规则；
+- `WorkerManager`：按会话创建 worker，不同会话并发；
+- `SessionWorker`：同一会话严格串行，发布 turn 生命周期事件；
+- `CSBotTurnHandler`：启动真实 CS-bot、检查知识库、恢复上下文并执行消息；
+- `SQLiteSessionStore`：持久化消息和飞书 `message_id` 幂等记录；
+- `HookBus`：隔离 hook 超时与异常；
+- `FeishuSender`：获取 tenant access token 并代表机器人发消息。
 
-- worker-specific logs named like `worker_oc_*.log`;
-- Python event hooks configured on a worker or session;
-- `cli.wire` and `cli.turn_done` events;
-- `TurnBegin`, `TextPart`, and `ContentPart` wire payloads;
-- hook context fields `record`, `work_dir`, `session_id`, and `logger`;
-- skills stored below `.agents/<agent>/skills/<skill>/SKILL.md`;
-- file-backed long-term memory and learning directories.
+## 部署约束
 
-## Deliberate implementation choices
+- 当前 SQLite 数据必须挂载持久卷；
+- SQLite 幂等表只对单实例可靠，当前生产形态应保持一个副本；
+- HTTPS/TLS 由网关或反向代理终止；
+- 模型和飞书密钥由部署平台注入；
+- `/health` 只说明进程存活，流量切换应以 `/ready` 为准；
+- 任一生产必需配置或 CS-bot 知识库初始化失败时，进程启动失败。
 
-- Workers are in-process asyncio actors in v0.1. Their public boundary allows a
-  later subprocess or container implementation.
-- SQLite persists session history. Human-curated `MEMORY.md` mutation is not
-  automated in v0.1.
-- Model access is represented by a provider protocol. Only deterministic mock
-  mode is enabled by default; an OpenAI-compatible provider is included.
-- Hooks run concurrently for each event, with independent timeout and failure
-  handling. They cannot crash the owning worker.
-- Tools are allow-listable and receive per-call timeouts. Arbitrary shell
-  execution is intentionally absent.
-- The dependency-free ASGI layer exposes health, debug chat, and Feishu event
-  routes. Production outbound delivery remains an injected channel concern.
+## 兼容依据与未知项
 
-## Not inferred
+仓库明确暴露了 worker 日志、Python hook、`cli.wire` / `cli.turn_done`、wire payload、hook context、skills 和文件型长期记忆等接口。
 
-The repository does not establish whether the original Kitty used queues,
-containers, a remote scheduler, a specific model gateway, or a particular
-authorization system. This project does not claim compatibility with those
-unknown internals.
+仓库无法证明原始 Kitty 是否使用远程队列、容器、特定模型网关或独立授权系统，因此本项目只声明对可观察接口和 CS-bot 实际运行路径的兼容，不声明内部实现一致。

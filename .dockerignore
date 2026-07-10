@@ -1,0 +1,15 @@
+.git
+.gitignore
+.codex-worktrees
+**/.venv
+**/.pycache
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+**/build
+**/dist
+**/.kitty
+**/.pip-cache
+cs_agent.db
+runs
+reports

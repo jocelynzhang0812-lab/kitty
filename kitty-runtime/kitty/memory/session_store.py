@@ -44,6 +44,14 @@ class SQLiteSessionStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS kitty_events (
+                    event_id TEXT PRIMARY KEY,
+                    seen_at REAL NOT NULL
+                )
+                """
+            )
 
     def load(self, session_id: str) -> SessionState:
         with self._connect() as connection:
@@ -90,3 +98,18 @@ class SQLiteSessionStore:
                 "SELECT session_id FROM kitty_sessions ORDER BY updated_at DESC"
             ).fetchall()
         return [str(row["session_id"]) for row in rows]
+
+    def accept_event(self, event_id: str, ttl_seconds: float = 86_400) -> bool:
+        """Persistently deduplicate channel events across process restarts."""
+
+        if not event_id:
+            return True
+        now = time.time()
+        cutoff = now - ttl_seconds
+        with self._connect() as connection:
+            connection.execute("DELETE FROM kitty_events WHERE seen_at < ?", (cutoff,))
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO kitty_events(event_id, seen_at) VALUES (?, ?)",
+                (event_id, now),
+            )
+            return cursor.rowcount == 1

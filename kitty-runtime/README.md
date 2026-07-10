@@ -1,122 +1,90 @@
-# Kitty Runtime Compatibility Project
+# Kitty Runtime（CS-bot 飞书生产运行时）
 
-This directory contains a clean-room implementation of the Kitty interfaces
-that can be inferred from the surrounding CS-bot repository. It is not the
-original Kitty source code.
+这是一个根据 CS-bot 仓库现有接口反向实现的 Kitty 兼容运行时，不是原始 Kitty 源码。当前版本已经把 CS-bot 的知识库、业务工具、会话、模型调用和飞书收发链路接入同一个可部署服务。
 
-The first milestone provides:
+## 当前能力
 
-- one serial worker queue per session and concurrency across sessions;
-- durable SQLite session history;
-- `cli.wire` and `cli.turn_done` lifecycle events;
-- dynamically loaded Python hooks with failure and timeout isolation;
-- provider-neutral agent/tool loop;
-- OpenAI-compatible Chat Completions provider;
-- deterministic mock model mode;
-- `SKILL.md` discovery under `.agents/*/skills/*`;
-- read-only `AGENTS.md` and `MEMORY.md` context loading;
-- a local CLI, dependency-free ASGI API, Feishu event parser, and JSONL events.
+- 每个会话独立串行队列，不同会话可并发处理；
+- SQLite 持久化会话历史和飞书 `message_id` 去重；
+- 启动时自动加载 CS-bot、16 个业务工具和本地知识库；
+- 自动恢复 CS-bot 的上下文历史；
+- 支持 OpenAI-compatible 模型接口，也保留本地 mock 模式；
+- 支持飞书 URL 校验、Verification Token、请求签名校验和 AES-256-CBC 解密；
+- 支持单聊文字消息、群聊 @ 机器人消息和主动回复；
+- 非文字消息返回固定引导语；
+- 提供存活探针 `/health` 和就绪探针 `/ready`；
+- 支持 Uvicorn 直接启动和 Docker 部署；
+- 支持 `cli.wire`、`cli.turn_done` 与现有反馈 hook。
 
-## Run locally
+## 本地运行
 
-No third-party dependency is required for mock mode.
+需要 Python 3.11 及以上版本。
 
 ```bash
 cd kitty-runtime
-env PYTHONPYCACHEPREFIX=.pycache python3 -m kitty --once "hello"
+python3 -m venv .venv
+.venv/bin/pip install -e .
+.venv/bin/python -m kitty --once "如何配置机器人？"
 ```
 
-Interactive mode with an example hook:
+开发环境没有设置模型密钥时默认使用确定性的 mock 模型，不会发起外部请求。状态默认保存在 `kitty-runtime/.kitty/`。
+
+## 生产启动
+
+从仓库根目录执行：
 
 ```bash
-env PYTHONPYCACHEPREFIX=.pycache python3 -m kitty \
-  --session demo \
-  --hook examples/echo_hook.py \
-  --json-events
+cp kitty-runtime/.env.production.example .env.production
+# 填写 .env.production 中的真实密钥和资源 ID
+set -a
+source .env.production
+set +a
+kitty-runtime/.venv/bin/uvicorn kitty.server:create_app \
+  --factory --app-dir kitty-runtime --host 0.0.0.0 --port 8000 --proxy-headers
 ```
 
-State is written under `.kitty/` by default:
+飞书事件订阅地址设置为：
 
 ```text
-.kitty/
-├── sessions.db
-├── logs/
-│   └── worker_<session>.log
-└── workspaces/
+https://你的域名/feishu/events
 ```
 
-## HTTP and Feishu event API
+完整的飞书权限、事件订阅、多维表字段、Docker 命令和上线验收步骤见 [生产部署指南](docs/production-deployment.md)。
 
-The ASGI app itself has no third-party dependency. Run it with an ASGI server
-such as Uvicorn when one is available:
+## HTTP 接口
+
+- `GET /health`：进程存活检查；
+- `GET /ready`：CS-bot、知识库和运行时完成初始化后返回 200；
+- `POST /feishu/events`：飞书加密事件入口；
+- `POST /v1/messages`：内部调试接口；生产环境默认关闭，设置独立的 `KITTY_DEBUG_API_TOKEN` 后才启用。
+
+生产环境会在进程启动阶段校验必需配置。缺少飞书密钥、模型密钥、多维表配置或内部通知 ID 时会直接启动失败，避免以半可用状态上线。
+
+## Docker
+
+从仓库根目录构建：
 
 ```bash
-uvicorn kitty.server:create_app --factory --host 127.0.0.1 --port 8000
+docker build -t cs-bot-kitty:local -f kitty-runtime/Dockerfile .
+docker run --rm -p 8000:8000 \
+  --env-file .env.production \
+  -v kitty-data:/data/kitty \
+  cs-bot-kitty:local
 ```
 
-Endpoints:
+当前持久化层是 SQLite，因此生产部署默认使用单实例。要横向扩容，需要先把会话和事件去重迁移到共享存储。
 
-- `GET /health`
-- `POST /v1/messages`
-- `POST /feishu/events`
+容器安装使用 `requirements.lock` 中经过测试的精确依赖版本；升级依赖后应重新运行完整测试和生产启动检查。
 
-`/feishu/events` supports URL challenge responses, text-message parsing,
-mention checks, and message-ID deduplication. A production deployment should
-pass an outbound `reply_sender` to `KittyASGIApp`. The default factory creates a
-dependency-free `FeishuSender` when `FEISHU_APP_ID` and `FEISHU_APP_SECRET` are
-present; otherwise it returns the generated reply only in its HTTP response for
-local verification.
-
-When an outbound sender is configured, the webhook acknowledges the event
-immediately and processes the model turn in a tracked background task, avoiding
-Feishu callback timeouts.
-
-## Real model provider
-
-Mock mode is the default. Applications can construct an
-`OpenAICompatibleProvider` with a runtime-only API key:
-
-```python
-import os
-
-from kitty.agent.providers import OpenAICompatibleProvider
-from kitty.runtime import KittyRuntime
-
-provider = OpenAICompatibleProvider(
-    api_key=os.environ["LLM_API_KEY"],
-    base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
-    model=os.environ["LLM_MODEL"],
-)
-runtime = KittyRuntime(provider=provider)
-```
-
-## Test
+## 测试
 
 ```bash
-env PYTHONPYCACHEPREFIX=.pycache python3 -m unittest discover -s tests -v
+cd kitty-runtime
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
-## Compatibility boundary
+## 兼容边界
 
-The implemented hook contract matches the signatures used by
-`csbot/hooks/feedback_hook.py`:
+运行时实现的是从当前仓库可观察行为中推断出的兼容接口。原始 Kitty 是否使用远程队列、子进程、容器调度或独立授权系统仍然未知。Python hook 在运行时进程内执行，只应加载受信任代码。
 
-```python
-listened_events = ["cli.wire", "cli.turn_done"]
-
-async def hook(event, ctx):
-    ...
-```
-
-The runtime exposes `event.event_type`, `event.session_id`, `event.data`,
-`ctx.record`, `ctx.work_dir`, `ctx.session_id`, and `ctx.logger`.
-
-Python hooks execute code in the runtime process and must therefore be trusted.
-
-When `FEISHU_VERIFICATION_TOKEN` is configured, the ASGI factory rejects event
-payloads with a different token. Encrypted Feishu events are not implemented in
-this milestone.
-
-See `docs/architecture.md` and `docs/event-protocol.md` for the inferred
-contracts and explicit uncertainty boundaries. CS-bot bridging and its current
-dependency limitation are documented in `docs/csbot-compatibility.md`.
+更多说明见 [架构](docs/architecture.md)、[事件协议](docs/event-protocol.md) 和 [CS-bot 接入](docs/csbot-compatibility.md)。

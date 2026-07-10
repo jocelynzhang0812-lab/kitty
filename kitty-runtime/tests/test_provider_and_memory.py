@@ -4,6 +4,7 @@ from pathlib import Path
 
 from kitty.agent.providers.openai_compatible import OpenAICompatibleProvider
 from kitty.memory.file_context import FileContext
+from kitty.memory.session_store import SQLiteSessionStore
 
 
 class ProviderAndMemoryTests(unittest.TestCase):
@@ -37,3 +38,11 @@ class ProviderAndMemoryTests(unittest.TestCase):
             rendered = context.render()
         self.assertIn("agent rules", rendered)
         self.assertIn("long memory", rendered)
+
+    def test_event_dedupe_persists_across_store_instances(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "sessions.db"
+            first = SQLiteSessionStore(path)
+            self.assertTrue(first.accept_event("om_once"))
+            second = SQLiteSessionStore(path)
+            self.assertFalse(second.accept_event("om_once"))

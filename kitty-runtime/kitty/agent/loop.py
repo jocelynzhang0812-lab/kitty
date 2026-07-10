@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from kitty.agent.providers.base import ModelProvider
+from kitty.core.context import AgentRecord
 from kitty.core.events import WireType
 from kitty.skills.loader import SkillCatalog
 from kitty.tools.registry import ToolRegistry
@@ -46,6 +47,9 @@ class AgentLoop:
         user_message: str,
         history: list[dict[str, Any]],
         emit_wire: WireEmitter,
+        *,
+        session_id: str = "",
+        record: AgentRecord | None = None,
     ) -> AgentRunResult:
         system_prompt = self.system_prompt
         if self.skills is not None:

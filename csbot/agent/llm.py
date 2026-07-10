@@ -1,5 +1,6 @@
 """LLM Agent 编排器：系统提示词 + Function Calling 循环"""
 import json
+import os
 import time
 from typing import Any, Dict, List, Optional
 from openai import AsyncOpenAI
@@ -227,7 +228,7 @@ class CSAgent:
         self.tool_sandbox = ToolCallSandbox()
         self.content_filter = HardContentFilter()
         # 智能摘要与报告系统：SQLite 持久化
-        self._db_conn = init_db()
+        self._db_conn = init_db(os.getenv("CS_DB_PATH") or None)
 
     def _build_tools(self) -> List[Dict]:
         """从 ToolRegistry 收集所有 Skill 的 OpenAI Schema"""

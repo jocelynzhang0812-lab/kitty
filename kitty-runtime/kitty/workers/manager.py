@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from kitty.agent.loop import AgentLoop
+from kitty.agent.handler import TurnHandler
 from kitty.core.context import AgentRecord
 from kitty.hooks.bus import HookBus
 from kitty.memory.session_store import SQLiteSessionStore
@@ -14,7 +14,7 @@ class WorkerManager:
     def __init__(
         self,
         *,
-        agent: AgentLoop,
+        agent: TurnHandler,
         hooks: HookBus,
         store: SQLiteSessionStore,
         workspace_root: Path,

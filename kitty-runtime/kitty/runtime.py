@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
+import inspect
 from typing import Any
 
+from kitty.agent.handler import TurnHandler
 from kitty.agent.loop import AgentLoop
 from kitty.agent.providers.base import ModelProvider
 from kitty.agent.providers.mock import MockProvider
@@ -30,6 +33,7 @@ class KittyRuntime:
         tools: ToolRegistry | None = None,
         hooks: HookBus | None = None,
         skills: SkillCatalog | None = None,
+        turn_handler: TurnHandler | None = None,
     ):
         self.config = config or KittyConfig.from_env()
         self.config.ensure_dirs()
@@ -46,7 +50,7 @@ class KittyRuntime:
         rendered_file_context = self.file_context.render()
         if rendered_file_context:
             system_prompt += "\n\n" + rendered_file_context
-        self.agent = AgentLoop(
+        self.agent: TurnHandler = turn_handler or AgentLoop(
             self.provider,
             self.tools,
             system_prompt=system_prompt,
@@ -62,6 +66,23 @@ class KittyRuntime:
             log_dir=self.config.log_dir,
         )
         self.loaded_hooks: list[LoadedHook] = []
+        self._started = False
+        self._start_lock = asyncio.Lock()
+
+    @property
+    def started(self) -> bool:
+        return self._started
+
+    async def start(self) -> None:
+        async with self._start_lock:
+            if self._started:
+                return
+            startup = getattr(self.agent, "startup", None)
+            if callable(startup):
+                value = startup()
+                if inspect.isawaitable(value):
+                    await value
+            self._started = True
 
     def load_hook(self, path: str | Path) -> LoadedHook:
         loaded = load_hook(path, self.hooks)
@@ -79,6 +100,7 @@ class KittyRuntime:
         record: AgentRecord | None = None,
         request_id: str | None = None,
     ) -> WorkerResult:
+        await self.start()
         return await self.workers.dispatch(
             session_id,
             message,
@@ -88,8 +110,15 @@ class KittyRuntime:
 
     async def close(self) -> None:
         await self.workers.shutdown()
+        shutdown = getattr(self.agent, "shutdown", None)
+        if self._started and callable(shutdown):
+            value = shutdown()
+            if inspect.isawaitable(value):
+                await value
+        self._started = False
 
     async def __aenter__(self) -> "KittyRuntime":
+        await self.start()
         return self
 
     async def __aexit__(self, exc_type, exc, traceback) -> None:

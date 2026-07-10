@@ -53,11 +53,17 @@ def _get_bitable() -> BitableClient:
 def _get_feishu() -> FeishuIntegration:
     global _feishu
     if _feishu is None:
+        chat_id_map = {}
+        user_id_map = {}
+        if os.getenv("INTERNAL_DEBUG_CHAT_ID"):
+            chat_id_map["internal_debug_group"] = os.getenv("INTERNAL_DEBUG_CHAT_ID")
+        if os.getenv("FEEDBACK_BOT_USER_ID"):
+            user_id_map["feedback_bot"] = os.getenv("FEEDBACK_BOT_USER_ID")
         _feishu = FeishuIntegration(
             app_id=os.getenv("FEISHU_APP_ID", ""),
             app_secret=os.getenv("FEISHU_APP_SECRET", ""),
-            chat_id_map={"internal_debug_group": "oc_8438587abb22f822bdda0d6281637b47"},
-            user_id_map={"feedback_bot": "ou_aff1ab05f24e06d9861faf58ff0b32f9"},
+            chat_id_map=chat_id_map,
+            user_id_map=user_id_map,
         )
     return _feishu
 

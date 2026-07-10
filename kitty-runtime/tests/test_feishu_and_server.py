@@ -1,11 +1,20 @@
 import asyncio
+import base64
+import hashlib
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from Crypto.Cipher import AES
 
 from kitty.agent.providers.mock import MockProvider
-from kitty.channels.feishu import FeishuChallenge, FeishuEventParser, FeishuSender
+from kitty.channels.feishu import (
+    FeishuChallenge,
+    FeishuEventParser,
+    FeishuSender,
+    UnsupportedFeishuMessage,
+)
 from kitty.core.config import KittyConfig
 from kitty.runtime import KittyRuntime
 from kitty.server import KittyASGIApp
@@ -28,7 +37,7 @@ def feishu_payload(message_id="om_1", message_type="text", mentions=True):
     }
 
 
-async def asgi_request(app, method, path, payload=None):
+async def asgi_request(app, method, path, payload=None, headers=None):
     sent = []
     consumed = False
 
@@ -47,7 +56,15 @@ async def asgi_request(app, method, path, payload=None):
         sent.append(message)
 
     await app(
-        {"type": "http", "method": method, "path": path, "headers": []},
+        {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "headers": [
+                (str(key).encode("latin-1"), str(value).encode("latin-1"))
+                for key, value in (headers or {}).items()
+            ],
+        },
         receive,
         send,
     )
@@ -77,7 +94,7 @@ class FeishuParserTests(unittest.TestCase):
 
         self.assertIsNotNone(first)
         self.assertIsNone(duplicate)
-        self.assertIsNone(non_text)
+        self.assertIsInstance(non_text, UnsupportedFeishuMessage)
         self.assertIsNone(unmentioned)
 
     def test_verification_token(self):
@@ -86,6 +103,58 @@ class FeishuParserTests(unittest.TestCase):
         payload["header"]["token"] = "wrong"
         with self.assertRaisesRegex(ValueError, "verification token"):
             parser.parse(payload)
+
+    def test_p2p_message_does_not_require_mention(self):
+        parser = FeishuEventParser(require_mention=True)
+        payload = feishu_payload("p2p", mentions=False)
+        payload["event"]["message"]["chat_type"] = "p2p"
+        payload["event"]["message"]["content"] = json.dumps({"text": "hello"})
+        message = parser.parse(payload)
+        self.assertIsNotNone(message)
+        self.assertEqual(message.content, "hello")
+
+    def test_signature_and_aes_decryption(self):
+        encrypt_key = "encrypt-key-for-test"
+        verification_token = "verify-token"
+        plaintext = json.dumps(
+            {"challenge": "encrypted-challenge", "token": verification_token},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        padding = AES.block_size - len(plaintext) % AES.block_size
+        padded = plaintext + bytes([padding]) * padding
+        iv = b"0123456789abcdef"
+        key = hashlib.sha256(encrypt_key.encode("utf-8")).digest()
+        encrypted = base64.b64encode(iv + AES.new(key, AES.MODE_CBC, iv).encrypt(padded)).decode()
+        body = json.dumps({"encrypt": encrypted}).encode("utf-8")
+        timestamp = str(int(time.time()))
+        nonce = "nonce"
+        signature = hashlib.sha256(
+            (timestamp + nonce + encrypt_key).encode("utf-8") + body
+        ).hexdigest()
+        parser = FeishuEventParser(
+            encrypt_key=encrypt_key,
+            verification_token=verification_token,
+        )
+        parsed = parser.parse_http(
+            body,
+            {
+                "X-Lark-Request-Timestamp": timestamp,
+                "X-Lark-Request-Nonce": nonce,
+                "X-Lark-Signature": signature,
+            },
+        )
+        self.assertIsInstance(parsed, FeishuChallenge)
+        self.assertEqual(parsed.challenge, "encrypted-challenge")
+
+        with self.assertRaisesRegex(ValueError, "signature"):
+            parser.parse_http(
+                body,
+                {
+                    "X-Lark-Request-Timestamp": timestamp,
+                    "X-Lark-Request-Nonce": nonce,
+                    "X-Lark-Signature": "wrong",
+                },
+            )
 
 
 class FeishuSenderTests(unittest.IsolatedAsyncioTestCase):
@@ -132,6 +201,34 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(health["ok"])
         self.assertEqual(status, 200)
         self.assertEqual(body["reply"], "api:hello")
+
+    async def test_debug_api_can_be_disabled_or_token_protected(self):
+        disabled = KittyASGIApp(self.runtime, debug_api_enabled=False)
+        disabled_status, _ = await asgi_request(
+            disabled,
+            "POST",
+            "/v1/messages",
+            {"session_id": "debug", "message": "hello"},
+        )
+        protected = KittyASGIApp(self.runtime, debug_api_token="secret")
+        rejected_status, _ = await asgi_request(
+            protected,
+            "POST",
+            "/v1/messages",
+            {"session_id": "debug", "message": "hello"},
+        )
+        accepted_status, accepted = await asgi_request(
+            protected,
+            "POST",
+            "/v1/messages",
+            {"session_id": "debug", "message": "hello"},
+            {"Authorization": "Bearer secret"},
+        )
+
+        self.assertEqual(disabled_status, 404)
+        self.assertEqual(rejected_status, 401)
+        self.assertEqual(accepted_status, 200)
+        self.assertEqual(accepted["reply"], "api:hello")
 
     async def test_feishu_challenge_and_message(self):
         status, challenge = await asgi_request(

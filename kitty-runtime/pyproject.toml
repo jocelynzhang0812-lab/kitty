@@ -9,7 +9,15 @@ description = "Clean-room Kitty-compatible agent worker runtime inferred from CS
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{name = "CS-bot contributors"}]
-dependencies = []
+dependencies = [
+  "aiohttp>=3.10,<4",
+  "httpx>=0.27,<1",
+  "openai>=1.60,<3",
+  "pycryptodome>=3.20,<4",
+  "python-dotenv>=1,<2",
+  "PyYAML>=6,<7",
+  "uvicorn[standard]>=0.30,<1",
+]
 
 [project.scripts]
 kitty = "kitty.cli:main"

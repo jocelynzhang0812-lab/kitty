@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from kitty.agent.loop import AgentLoop
+from kitty.agent.handler import TurnHandler
 from kitty.core.context import AgentRecord, HookContext, RecordMeta
 from kitty.core.events import EventType, SessionEvent, WireType
 from kitty.hooks.bus import HookBus
@@ -63,7 +63,7 @@ class SessionWorker:
         self,
         session_id: str,
         *,
-        agent: AgentLoop,
+        agent: TurnHandler,
         hooks: HookBus,
         store: SQLiteSessionStore,
         workspace_root: Path,
@@ -171,7 +171,13 @@ class SessionWorker:
                     request.record,
                 )
 
-            result = await self.agent.run(request.message, state.messages, emit_wire)
+            result = await self.agent.run(
+                request.message,
+                state.messages,
+                emit_wire,
+                session_id=self.session_id,
+                record=request.record,
+            )
             state.messages.extend(result.messages)
             state.messages = state.messages[-self.max_history_messages :]
             state.metadata.update(
