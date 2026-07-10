@@ -1,10 +1,9 @@
-# Kitty Feishu Runtime
+# Kitty Runtime
 
 Kitty Runtime 提供安全 Webhook、模型工具循环、会话 worker、持久化投递和通用扩展接口。
 
 ## 运行模式
 
-- 开发环境：没有 `LLM_API_KEY` 时自动使用 mock provider；
 - 生产环境：强制要求真实模型、飞书凭据、Verification Token 和 Encrypt Key；
 - 单聊直接响应；群聊默认仅响应 @ 机器人；
 - 非文字消息返回文字引导。
