@@ -1,0 +1,8 @@
+.kitty/
+.pycache/
+__pycache__/
+*.py[cod]
+.venv/
+.pip-cache/
+dist/
+*.egg-info/

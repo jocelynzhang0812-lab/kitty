@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kitty-runtime-compat"
+version = "0.1.0"
+description = "Clean-room Kitty-compatible agent worker runtime inferred from CS-bot integration contracts"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "CS-bot contributors"}]
+dependencies = []
+
+[project.scripts]
+kitty = "kitty.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kitty*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
