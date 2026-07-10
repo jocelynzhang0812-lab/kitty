@@ -1,7 +1,5 @@
 # CS Bot Agent 配置
 
-## 项目背景
-
 Kimi Claw 官方智能客服 Agent，基于 LLM Agent 架构，运行在飞书群聊中。
 
 ## Skills 目录
@@ -38,5 +36,4 @@ Agent 可用技能位于 `.agents/cs-bot/skills/`：
 
 - 遵循现有代码风格
 - 新增功能补充测试用例
-- 不要主动提及 Kitty 框架
 - 禁止主动使用 SearchWeb 工具

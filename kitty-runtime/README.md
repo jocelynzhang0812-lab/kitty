@@ -1,7 +1,5 @@
 # Kitty Runtime（CS-bot 飞书生产运行时）
 
-这是一个根据 CS-bot 仓库现有接口反向实现的 Kitty 兼容运行时，不是原始 Kitty 源码。当前版本已经把 CS-bot 的知识库、业务工具、会话、模型调用和飞书收发链路接入同一个可部署服务。
-
 ## 当前能力
 
 - 每个会话独立串行队列，不同会话可并发处理；
@@ -21,7 +19,6 @@
 ## 本地运行
 
 需要 Python 3.11 及以上版本。
-
 ```bash
 cd kitty-runtime
 python3 -m venv .venv
@@ -44,13 +41,10 @@ set +a
 kitty-runtime/.venv/bin/uvicorn kitty.server:create_app \
   --factory --app-dir kitty-runtime --host 0.0.0.0 --port 8000 --proxy-headers
 ```
-
 飞书事件订阅地址设置为：
-
 ```text
 https://你的域名/feishu/events
 ```
-
 完整的飞书权限、事件订阅、多维表字段、Docker 命令和上线验收步骤见 [生产部署指南](docs/production-deployment.md)。
 
 ## HTTP 接口
@@ -88,14 +82,11 @@ docker run --rm -p 8000:8000 \
 容器安装使用 `requirements.lock` 中经过测试的精确依赖版本；升级依赖后应重新运行完整测试和生产启动检查。
 
 ## 测试
-
 ```bash
 cd kitty-runtime
 .venv/bin/python -m unittest discover -s tests -v
 ```
-
 ## 兼容边界
 
 运行时实现的是从当前仓库可观察行为中推断出的兼容接口。原始 Kitty 是否使用远程队列、子进程、容器调度或独立授权系统仍然未知。Python hook 在运行时进程内执行，只应加载受信任代码。
-
 更多说明见 [架构](docs/architecture.md)、[事件协议](docs/event-protocol.md) 和 [CS-bot 接入](docs/csbot-compatibility.md)。
