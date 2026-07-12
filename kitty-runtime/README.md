@@ -17,7 +17,29 @@ python3 -m venv .venv
 .venv/bin/python -m kitty --once "hello"
 ```
 
-## 生产启动
+## 10 分钟上线
+
+```bash
+.venv/bin/kitty setup
+```
+
+该命令只监听 `127.0.0.1`，打开一个带随机访问令牌的本地向导。它会：
+
+- 引导填写机器人职责、模型和飞书应用信息；
+- 真实检测模型 API、飞书凭据、持久化目录、Tools 和 Hooks；
+- 仅在全部检查通过后保存 `.env`，文件权限为 `0600`；
+- 给出可直接复制到飞书的事件回调地址。
+
+保存后运行：
+
+```bash
+.venv/bin/kitty doctor --env-file .env --live
+.venv/bin/kitty serve --env-file .env
+```
+
+`doctor --live` 会向模型发送一个极小请求，并向飞书换取 tenant token。完整步骤见[10 分钟上线指南](docs/ten-minute-launch.md)。
+
+## 手动生产启动
 
 ```bash
 cp .env.production.example ../.env.production
@@ -59,4 +81,5 @@ kitty --state-dir /data/kitty --retry-delivery om_xxx
 
 - [系统架构](docs/architecture.md)
 - [事件协议](docs/event-protocol.md)
+- [10 分钟上线](docs/ten-minute-launch.md)
 - [飞书生产部署](docs/production-deployment.md)
