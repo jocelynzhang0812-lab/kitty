@@ -41,10 +41,18 @@ cd kitty/kitty-runtime
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.lock
 .venv/bin/pip install --no-deps -e .
-.venv/bin/python -m kitty --once "hello"
+.venv/bin/kitty setup
 ```
 
-开发环境未配置模型密钥时使用本地 mock provider，不会访问外部服务。
+浏览器向导会依次完成机器人设定、模型连接、飞书连接和上线检测，密钥只写入本机权限为 `0600` 的 `.env`。全部检查通过后：
+
+```bash
+.venv/bin/kitty serve --env-file .env
+```
+
+把向导生成的 `https://你的域名/feishu/events` 粘贴到飞书事件订阅页即可。详细时间表见[10 分钟上线指南](kitty-runtime/docs/ten-minute-launch.md)。
+
+仅体验本地对话时，可以运行 `.venv/bin/python -m kitty --once "hello"`；未配置模型密钥会使用本地 mock provider。
 
 ## 扩展机器人能力
 
@@ -80,12 +88,23 @@ KITTY_SYSTEM_PROMPT=You are our internal Feishu assistant.
 
 ## 飞书生产运行
 
+推荐先运行向导：
+
+```bash
+cd kitty-runtime
+.venv/bin/kitty setup
+.venv/bin/kitty doctor --env-file .env --live
+.venv/bin/kitty serve --env-file .env
+```
+
+需要容器部署时，也可以使用生成的 `.env`：
+
 ```bash
 cp kitty-runtime/.env.production.example .env.production
 # 填写真实模型和飞书应用配置
 docker build -t kitty -f kitty-runtime/Dockerfile .
 docker run --rm -p 8000:8000 \
-  --env-file .env.production \
+  --env-file kitty-runtime/.env \
   -v kitty-data:/data/kitty \
   kitty
 ```
@@ -96,7 +115,7 @@ docker run --rm -p 8000:8000 \
 https://你的域名/feishu/events
 ```
 
-完整步骤见[飞书生产部署指南](kitty-runtime/docs/production-deployment.md)。
+完整步骤见[10 分钟上线指南](kitty-runtime/docs/ten-minute-launch.md)和[飞书生产部署指南](kitty-runtime/docs/production-deployment.md)。
 
 ## 仓库结构
 

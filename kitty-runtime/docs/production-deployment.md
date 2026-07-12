@@ -1,5 +1,7 @@
 # 飞书生产部署指南
 
+首次部署推荐直接运行 `kitty setup`，由本地向导完成配置、真实连通性检测和 `.env` 保存；参见[10 分钟上线](ten-minute-launch.md)。下面保留手动配置和容器化部署细节。
+
 ## 1. 创建飞书自建应用
 
 1. 创建企业自建应用并启用机器人能力；
@@ -30,7 +32,8 @@ cp kitty-runtime/.env.production.example .env.production
 - `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`；
 - `FEISHU_APP_ID`、`FEISHU_APP_SECRET`；
 - `FEISHU_VERIFICATION_TOKEN`、`FEISHU_ENCRYPT_KEY`；
-- `KITTY_SYSTEM_PROMPT`。
+- `KITTY_BOT_NAME`、`KITTY_SYSTEM_PROMPT`；
+- `KITTY_PUBLIC_BASE_URL`，必须是外部可访问的 HTTPS 地址。
 
 可选扩展：
 

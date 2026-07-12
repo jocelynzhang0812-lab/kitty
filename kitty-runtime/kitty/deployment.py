@@ -25,6 +25,8 @@ def _csv_env(name: str) -> tuple[str, ...]:
 class DeploymentSettings:
     environment: str = "development"
     project_root: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2])
+    bot_name: str = "Kitty Bot"
+    public_base_url: str = ""
     model_provider: str = "openai_compatible"
     model_api_key: str = field(default="", repr=False)
     model_base_url: str = "https://api.openai.com/v1"
@@ -54,6 +56,8 @@ class DeploymentSettings:
         return cls(
             environment=environment,
             project_root=project_root,
+            bot_name=os.getenv("KITTY_BOT_NAME", "Kitty Bot").strip(),
+            public_base_url=os.getenv("KITTY_PUBLIC_BASE_URL", "").strip().rstrip("/"),
             model_provider=os.getenv("KITTY_MODEL_PROVIDER", default_provider).strip().lower(),
             model_api_key=api_key,
             model_base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
@@ -93,6 +97,8 @@ class DeploymentSettings:
             errors.append("LLM_TIMEOUT_SECONDS must be positive")
         if not self.project_root.is_dir():
             errors.append(f"KITTY_PROJECT_ROOT does not exist: {self.project_root}")
+        if self.public_base_url and not self.public_base_url.startswith("https://"):
+            errors.append("KITTY_PUBLIC_BASE_URL must start with https://")
 
         if self.environment == "production":
             required = {
@@ -102,6 +108,8 @@ class DeploymentSettings:
                 "FEISHU_ENCRYPT_KEY": self.feishu_encrypt_key,
                 "LLM_API_KEY": self.model_api_key,
                 "LLM_MODEL": self.model_name,
+                "KITTY_BOT_NAME": self.bot_name,
+                "KITTY_PUBLIC_BASE_URL": self.public_base_url,
             }
             for name, value in required.items():
                 if not value:
@@ -121,6 +129,7 @@ class DeploymentSettings:
     def public_summary(self) -> dict[str, object]:
         return {
             "environment": self.environment,
+            "bot": self.bot_name,
             "model_provider": self.model_provider,
             "model": self.model_name,
             "feishu_encryption": bool(self.feishu_encrypt_key),
@@ -130,6 +139,9 @@ class DeploymentSettings:
             "delivery_max_attempts": self.delivery_max_attempts,
             "tool_modules": list(self.tool_modules),
             "hooks": len(self.hook_paths),
+            "callback_url": f"{self.public_base_url}/feishu/events"
+            if self.public_base_url
+            else "",
         }
 
 
