@@ -1,78 +1,118 @@
 # Kitty
 
-Kitty 是一个通用、可部署的飞书 AI 机器人，负责飞书事件安全、会话并发、模型调用、工具扩展、Hook、持久化投递和运维；
-你的机器人业务通过系统提示词、工具模块、Skills 和 Hooks 注入。
+Kitty 是一个面向飞书的生产级 AI Agent Runtime。
 
-## 架构
+它不是一个大而全的个人助理，也不是多平台聊天机器人框架。Kitty 的目标更窄：让一个飞书机器人可以稳定接收事件、运行 Agent、调用工具、回复飞书，并且在生产环境里能扩容、恢复、审计和隔离风险。
 
-Kitty 同时支持两种部署模式：单进程 SQLite 适合快速上线，分布式 PostgreSQL 模式适合独立扩容。
+如果你要做的是“在飞书里接一个真实可上线的 Agent”，Kitty 提供的是运行时骨架：
+
+- 飞书 Webhook 验签、解密、去重和事件解析；
+- Agent Worker、模型、工具、Skills、Hooks；
+- 持久化 Inbox / Outbox，失败重试和死信恢复；
+- 单进程快速上线和 PostgreSQL 分布式扩容两种部署方式；
+- 工具子进程隔离和 Docker 容器沙箱；
+- 面向联调的 `setup`、`doctor`、`jobs`、`retry-job` 运维命令。
+
+## Kitty 解决什么问题
+
+飞书机器人真正上线时，难点通常不在“能不能回复一句话”，而在这些边界：
+
+- 飞书回调必须快速返回，否则平台会重试；
+- HTTP 收到事件以后，Agent 运行、工具调用、飞书发送都可能失败；
+- 发送失败不能重新跑模型，否则会产生重复业务动作；
+- 同一个会话要串行，不同会话要并发；
+- Worker 要能横向扩容，但不能让两个 Worker 同时改同一段会话历史；
+- 工具调用要有超时、输出限制和隔离边界；
+- Server、Worker、Sender 不应该共享不必要的密钥。
+
+Kitty 的架构就是围绕这些生产问题设计的。
+
+## 架构总览
+
+Kitty 有两种运行模式。
+
+第一种是单进程模式，适合本地联调、低流量机器人和 10 分钟上线：
 
 ```mermaid
 flowchart TD
-    FS["飞书 HTTPS Webhook"] --> SEC["签名 · AES 解密 · Token 校验"]
-    SEC --> QUEUE["SQLite 持久化投递队列"]
-    QUEUE --> WM["WorkerManager"]
-    WM --> SW["SessionWorker<br/>同会话串行 · 不同会话并发"]
-    SW --> LOOP["AgentLoop"]
-    LOOP --> MODEL["OpenAI-compatible Model"]
-    LOOP --> TOOLS["自定义 Tools"]
-    LOOP --> SKILLS["SKILL.md"]
-    SW --> HOOKS["HookBus"]
-    SW --> MEMORY["SQLite 会话记忆"]
-    LOOP --> SEND["FeishuSender<br/>限速 · UUID 幂等"]
+    Feishu["飞书 Webhook"] --> Parser["FeishuEventParser<br/>验签 · 解密 · Token · 去重"]
+    Parser --> Queue["SQLite Durable Queue"]
+    Queue --> Runtime["KittyRuntime"]
+    Runtime --> WorkerManager["WorkerManager"]
+    WorkerManager --> SessionWorker["SessionWorker<br/>同会话串行 · 不同会话并发"]
+    SessionWorker --> AgentLoop["AgentLoop"]
+    AgentLoop --> Model["OpenAI-compatible Model"]
+    AgentLoop --> Tools["Tools<br/>in-process / subprocess / container"]
+    AgentLoop --> Skills["SKILL.md"]
+    SessionWorker --> Hooks["HookBus"]
+    SessionWorker --> Store["SQLite Session Store"]
+    Runtime --> Sender["FeishuSender<br/>tenant token · uuid 幂等 · 限速"]
 ```
 
-分布式模式把职责拆成三个独立进程：
+第二种是分布式模式，适合真实生产和独立扩容：
 
 ```mermaid
 flowchart LR
-    FS["飞书 Webhook"] --> SERVER["Kitty Server × N"]
-    SERVER --> DB["PostgreSQL<br/>Inbox · Session Lease · Outbox"]
-    DB --> WORKER["Agent Worker × N"]
-    WORKER --> MODEL["Model · Tools · Skills"]
-    WORKER --> DB
-    DB --> SENDER["Sender × N"]
-    SENDER --> FS
+    Feishu["飞书 Webhook"] --> Server["Kitty Server × N<br/>只验签、解密、落 Inbox、ACK"]
+    Server --> DB["PostgreSQL<br/>Inbox · Session Lease · Sessions · Outbox"]
+    DB --> Worker["Agent Worker × N<br/>模型 · 工具 · Skills · Hooks"]
+    Worker --> DB
+    DB --> Sender["Sender × N<br/>只发送飞书消息"]
+    Sender --> Feishu
 ```
 
-## 核心能力
+分布式模式里的职责边界很明确：
 
-- 飞书请求签名、AES-256-CBC 解密和 Verification Token 校验；
-- 回调先落盘再确认，失败指数退避，重启后恢复未完成任务；
-- 每个会话独立串行 worker，不同会话并发；
-- OpenAI-compatible Chat Completions 模型接口；
-- Python 工具模块、`SKILL.md` 和事件 Hook 扩展；
-- SQLite 会话历史、事件去重、投递状态和死信重放；
-- 飞书发送限速和稳定 `uuid`，避免网络重试重复回复；
-- 交互式消息卡片：卡片构建器（文本/按钮/下拉）、`card.action.trigger` 回调走同一条持久投递链路、表情回应与卡片原地更新；
-- 图片消息：`FEISHU_ACCEPT_IMAGES=1` 开启接收（`image_key` 暴露给工具/Hook），支持资源下载、图片上传与发送；
-- `/health`、`/ready`、生产配置校验和 Docker 部署。
-- PostgreSQL 分布式 Inbox/Outbox、Session Lease、fencing token 和独立 Server/Worker/Sender 扩容。
+- `kitty server`：只处理飞书 HTTP 回调，完成安全校验后写入 PostgreSQL Inbox，然后立即 ACK；
+- `kitty worker`：领取 Inbox Job，持有 Session Lease，运行模型和工具，保存会话，写入 Outbox；
+- `kitty sender`：领取 Outbox Job，使用稳定 UUID 幂等发送飞书消息，失败只重试发送，不重新运行 Agent。
 
-## 快速开始
+PostgreSQL 是生产协调层，负责 Inbox、Outbox、事件去重、会话历史、Session Lease 和 fencing token。`FOR UPDATE SKIP LOCKED` 用来让多个 Worker/Sender 安全并发领取任务。
 
-```bash
-git clone https://github.com/jocelynzhang0812-lab/kitty.git
-cd kitty/kitty-runtime
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.lock
-.venv/bin/pip install --no-deps -e .
-.venv/bin/kitty setup
+## 关键模块
+
+```text
+kitty-runtime/
+├── kitty/
+│   ├── channels/          # 飞书事件解析、消息发送、卡片、图片
+│   ├── agent/             # provider-neutral AgentLoop 和模型协议
+│   ├── tools/             # ToolRegistry、执行器、子进程/容器隔离
+│   ├── workers/           # 会话级 WorkerManager 和 SessionWorker
+│   ├── memory/            # SQLite / PostgreSQL session 和队列存储
+│   ├── distributed/       # server / worker / sender 三进程实现
+│   ├── hooks/             # 生命周期事件 HookBus
+│   ├── skills/            # SKILL.md 加载和选择
+│   ├── server.py          # 单进程 ASGI 飞书服务
+│   ├── runtime.py         # 运行时装配入口
+│   └── cli.py             # setup / doctor / serve / server / worker / sender
+├── docs/                  # 上线、生产部署、分布式部署和事件协议
+├── examples/              # 工具和 Hook 示例
+├── tests/                 # 单元测试和 PostgreSQL 集成测试
+├── Dockerfile
+└── pyproject.toml
 ```
 
-浏览器向导会依次完成机器人设定、模型连接、飞书连接和上线检测，密钥只写入本机权限为 `0600` 的 `.env`。全部检查通过后：
+## 飞书接入能力
 
-```bash
-.venv/bin/kitty serve --env-file .env
-```
+Kitty 内置飞书生产接入需要的基础能力：
 
-把向导生成的 `https://你的域名/feishu/events` 粘贴到飞书事件订阅页即可。详细时间表见[10 分钟上线指南](kitty-runtime/docs/ten-minute-launch.md)。
+- Event v2.0 回调解析；
+- Verification Token 校验；
+- 飞书请求签名和时间戳校验；
+- Encrypt Key AES-256-CBC 解密；
+- URL challenge 响应；
+- 单聊和群聊消息；
+- 群聊按 `@` 触发；
+- 文本消息、图片消息、卡片动作；
+- 飞书消息卡片构建、更新、表情回应；
+- tenant access token 缓存；
+- 发送端稳定 `uuid`，避免重试导致重复消息；
+- 失败退避重试和 dead letter；
+- `/health` 和 `/ready` 探针。
 
-仅体验本地对话时，可以运行 `.venv/bin/python -m kitty --once "hello"`；未配置模型密钥会使用本地 mock provider。
+## 工具和沙箱
 
-## 扩展机器人能力
-
-工具模块只需导出同步函数 `register_tools(registry)`：
+工具通过 Python 模块注册：
 
 ```python
 from kitty.tools.registry import ToolRegistry
@@ -98,57 +138,117 @@ def register_tools(registry: ToolRegistry) -> None:
     )
 ```
 
-生产环境通过逗号分隔的模块名加载：
+生产环境可以选择三种执行边界：
 
 ```text
-KITTY_TOOL_MODULES=examples.tools,my_bot.tools
-KITTY_HOOK_PATHS=examples/echo_hook.py,my_bot/audit_hook.py
-KITTY_SYSTEM_PROMPT=You are our internal Feishu assistant.
+KITTY_TOOL_EXECUTOR=in_process   # 默认，本地调试最简单
+KITTY_TOOL_EXECUTOR=subprocess   # 每次工具调用进入独立 Python 子进程
+KITTY_TOOL_EXECUTOR=container    # 每次工具调用进入短生命周期 Docker 容器
 ```
 
-Worker 可以把工具放到独立 Python 子进程执行：
+`subprocess` 模式能在工具超时后直接杀掉子进程。`container` 模式默认使用：
 
-```text
-KITTY_TOOL_EXECUTOR=subprocess
-KITTY_TOOL_MAX_OUTPUT_BYTES=65536
-KITTY_TOOL_DENYLIST=dangerous_tool
-```
+- `--network none`
+- `--read-only`
+- `--cap-drop ALL`
+- `no-new-privileges`
+- CPU / 内存 / pids 限制
+- tmpfs `/tmp`
+- 只读 workspace mount
 
-使用 subprocess 模式时，工具 handler 必须是可导入函数；如果使用 lambda 或闭包，需要在 `registry.add(..., handler_ref="module:function")` 中显式提供导入路径。
-
-更严格的生产隔离可以切到容器执行：
+容器模式示例：
 
 ```text
 KITTY_TOOL_EXECUTOR=container
 KITTY_TOOL_CONTAINER_IMAGE=kitty-runtime:latest
+KITTY_TOOL_CONTAINER_WORKSPACE=/app/kitty-runtime
 KITTY_TOOL_CONTAINER_NETWORK=none
 KITTY_TOOL_CONTAINER_MEMORY=256m
 KITTY_TOOL_CONTAINER_CPUS=1
+KITTY_TOOL_CONTAINER_PIDS_LIMIT=128
+KITTY_TOOL_CONTAINER_TMPFS_SIZE=64m
 ```
 
-容器模式会使用短生命周期 Docker 容器执行工具，默认无网络、只读根文件系统、丢弃 Linux capabilities，并设置进程数、CPU、内存和 tmpfs 限制。
+使用 `subprocess` 或 `container` 时，工具 handler 必须是可导入函数。lambda 或闭包需要显式提供 `handler_ref="module:function"`。
 
-## 飞书生产运行
+## 和 OpenClaw 接入飞书相比
 
-推荐先运行向导：
+OpenClaw 是一个更大的个人 AI assistant / 多渠道 Gateway。它支持 WhatsApp、Telegram、Slack、Discord、Teams、Matrix、Feishu、微信、QQ 等很多渠道，并带有本地 Gateway、skills、companion apps、Canvas、voice、multi-agent routing 等完整个人助理生态。
+
+Kitty 的定位不同：它不是要覆盖所有消息渠道，而是把飞书机器人这一个入口做成更直接的生产 runtime。
+
+| 维度 | Kitty | OpenClaw |
+| --- | --- | --- |
+| 产品定位 | 飞书优先的生产级 Agent Runtime | 多渠道个人 AI assistant / Gateway |
+| 接入面 | 专注飞书 Webhook、卡片、图片、发送幂等 | 覆盖大量聊天渠道，Feishu 是其中之一 |
+| 上线复杂度 | 少量 Python 配置；`setup` / `doctor` / `serve` 面向飞书联调 | 功能更全，但 Gateway、channel、skills、daemon 配置面更大 |
+| 生产队列 | 内置 SQLite durable queue；分布式模式用 PostgreSQL Inbox / Outbox | 更偏个人 Gateway 和多渠道事件分发 |
+| 横向扩容 | Server / Worker / Sender 三角色可独立扩容 | 重点是本地/自托管 personal assistant，扩容不是 Feishu 接入的主路径 |
+| 会话一致性 | PostgreSQL Session Lease + fencing token | 依赖 OpenClaw 自身 session / sandbox / agent routing 体系 |
+| 密钥边界 | Server、Worker、Sender 三角色 env 分离 | 多渠道统一 Gateway 配置，能力更广但边界更复杂 |
+| 工具安全 | in-process / subprocess / Docker container 三档 | OpenClaw 有 sandbox 体系，生态更大，默认/策略需按 channel 和 agent 配置 |
+| 适合场景 | 企业自建飞书 Agent、客服/运营/内部助手、需要稳定回调和队列恢复 | 个人全能助理、多渠道自动化、桌面/移动 companion 体验 |
+
+Kitty 相比 OpenClaw 接入飞书的主要优势：
+
+1. **飞书路径更短。** Kitty 的主链路就是 `Feishu -> Server -> Worker -> Sender -> Feishu`，不需要先理解一个多渠道 Gateway 生态。
+2. **生产失败模型更清晰。** 入站事件先落 Inbox，模型运行后写 Outbox，发送失败只重试 Sender，不会重新跑 Agent。
+3. **Worker 可以真正独立扩容。** 多个 Worker 通过 PostgreSQL 领取任务，同一会话由 Session Lease 串行保护，不同会话可以并发。
+4. **密钥暴露面更小。** Server 不需要模型密钥，Worker 不需要飞书 App Secret，Sender 不需要模型密钥。
+5. **飞书联调更直接。** `setup` 生成回调地址，`doctor --live` 同时检测模型和飞书凭据，`/ready` 可用于部署探针。
+6. **工具隔离是运行时一等能力。** 生产 Worker 可以把工具放到子进程或 Docker 容器中，便于限制超时、输出和系统权限。
+
+Kitty 的劣势也很明确：
+
+- 不提供 OpenClaw 那样的多渠道生态；
+- 没有 companion app、voice、Canvas、ClawHub 这类成熟体验；
+- 内置工具数量少，需要你按业务自己写 Python tools；
+- container sandbox 是工具级隔离，不是完整多租户安全平台；
+- 如果你要做个人全能助理，OpenClaw 的现成能力更丰富。
+
+简单判断：
+
+- **只做飞书企业自建 Agent：优先 Kitty。**
+- **要一个跨很多聊天软件的个人助理：优先 OpenClaw。**
+- **要把 OpenClaw 的 Agent 能力包装进飞书生产服务：可以用 Kitty 做飞书入口和生产队列，用工具调用去桥接外部 Agent。**
+
+## 10 分钟联调
+
+本地准备：
 
 ```bash
-cd kitty-runtime
+git clone https://github.com/jocelynzhang0812-lab/kitty.git
+cd kitty/kitty-runtime
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.lock
+.venv/bin/pip install --no-deps -e .
+```
+
+启动配置向导：
+
+```bash
 .venv/bin/kitty setup
-.venv/bin/kitty doctor --env-file .env --live
-.venv/bin/kitty serve --env-file .env
 ```
 
-需要容器部署时，也可以使用生成的 `.env`：
+向导会让你填写：
+
+- 机器人名称和系统提示词；
+- OpenAI-compatible 模型地址、模型名和 API Key；
+- 飞书 App ID / App Secret；
+- Verification Token / Encrypt Key；
+- 公网 HTTPS base URL；
+- 可选的 Tools 和 Hooks。
+
+检查配置：
 
 ```bash
-cp kitty-runtime/.env.production.example .env.production
-# 填写真实模型和飞书应用配置
-docker build -t kitty -f kitty-runtime/Dockerfile .
-docker run --rm -p 8000:8000 \
-  --env-file kitty-runtime/.env \
-  -v kitty-data:/data/kitty \
-  kitty
+.venv/bin/kitty doctor --env-file .env --live
+```
+
+启动单进程服务：
+
+```bash
+.venv/bin/kitty serve --env-file .env --host 0.0.0.0 --port 8000
 ```
 
 飞书事件订阅地址：
@@ -157,32 +257,86 @@ docker run --rm -p 8000:8000 \
 https://你的域名/feishu/events
 ```
 
-完整步骤见[10 分钟上线指南](kitty-runtime/docs/ten-minute-launch.md)和[飞书生产部署指南](kitty-runtime/docs/production-deployment.md)。
+联调时建议先测：
 
-## 分布式运行
+1. 飞书保存事件订阅 URL，确认 challenge 通过；
+2. 单聊发送一条文本，确认机器人回复；
+3. 群聊不 `@` 不回复；
+4. 群聊 `@` 后回复；
+5. 重启进程后再发消息，确认会话历史仍在；
+6. 如果开启图片，发送图片消息确认 `image_key` 能进入工具/Hook；
+7. 如果开启卡片，点击按钮确认 `card.action.trigger` 能走同一条链路。
+
+完整流程见：
+
+- [10 分钟上线指南](kitty-runtime/docs/ten-minute-launch.md)
+- [飞书生产部署指南](kitty-runtime/docs/production-deployment.md)
+- [分布式部署指南](kitty-runtime/docs/distributed-deployment.md)
+
+## 分布式部署
+
+复制三份角色配置：
 
 ```bash
 cp kitty-runtime/.env.server.example kitty-runtime/.env.server
 cp kitty-runtime/.env.worker.example kitty-runtime/.env.worker
 cp kitty-runtime/.env.sender.example kitty-runtime/.env.sender
-# 分角色填写真实配置，Worker 不会获得飞书密钥
-docker compose -f docker-compose.distributed.yml up --build -d
-docker compose -f docker-compose.distributed.yml up -d --scale worker=4 --scale sender=2
 ```
 
-在分布式模式下，Server 只验签、落盘和确认；Agent Worker 只运行模型与工具；Sender 只发送飞书消息。发送失败不会重新运行 Agent。完整说明见[分布式部署指南](kitty-runtime/docs/distributed-deployment.md)。
+启动：
 
-## 仓库结构
+```bash
+docker compose -f docker-compose.distributed.yml up --build -d
+```
+
+扩容：
+
+```bash
+docker compose -f docker-compose.distributed.yml up -d \
+  --scale worker=4 \
+  --scale sender=2
+```
+
+角色密钥边界：
 
 ```text
-.
-└── kitty-runtime/
-    ├── kitty/          # 运行时源码
-    ├── examples/       # 中性工具与 Hook 示例
-    ├── tests/          # 单元和集成测试
-    ├── docs/           # 架构、事件协议和部署指南
-    ├── Dockerfile
-    └── pyproject.toml
+.env.server  # Verification Token / Encrypt Key
+.env.worker  # Model API Key / Tools / Hooks / Workspace
+.env.sender  # Feishu App ID / App Secret
+```
+
+运维命令：
+
+```bash
+KITTY_DATABASE_URL=postgresql://... kitty jobs
+KITTY_DATABASE_URL=postgresql://... kitty retry-job inbox JOB_ID
+KITTY_DATABASE_URL=postgresql://... kitty retry-job outbox JOB_ID
+```
+
+## 常用环境变量
+
+```text
+KITTY_ENV=production
+KITTY_BOT_NAME=Team Assistant
+KITTY_SYSTEM_PROMPT=You are a helpful Feishu assistant.
+
+LLM_API_KEY=...
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=...
+LLM_TIMEOUT_SECONDS=120
+
+FEISHU_APP_ID=...
+FEISHU_APP_SECRET=...
+FEISHU_VERIFICATION_TOKEN=...
+FEISHU_ENCRYPT_KEY=...
+FEISHU_REQUIRE_MENTION=1
+FEISHU_ACCEPT_IMAGES=0
+
+KITTY_TOOL_MODULES=examples.tools
+KITTY_HOOK_PATHS=
+KITTY_TOOL_EXECUTOR=subprocess
+KITTY_TOOL_DENYLIST=
+KITTY_TOOL_MAX_OUTPUT_BYTES=65536
 ```
 
 ## 测试
@@ -192,4 +346,22 @@ cd kitty-runtime
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-SQLite 模式保持向后兼容并面向单实例；需要横向扩容时使用 PostgreSQL 分布式模式。
+如果要跑 PostgreSQL 分布式测试：
+
+```bash
+KITTY_TEST_POSTGRES_URL=postgresql://kitty:kitty@127.0.0.1:55432/kitty_test \
+  .venv/bin/python -m unittest discover -s tests -v
+```
+
+## 当前状态
+
+Kitty 现在已经具备真实飞书上线所需的主干能力：
+
+- 单进程 SQLite 模式可用于快速联调和小规模部署；
+- PostgreSQL 分布式模式可用于生产扩容；
+- 工具可进入子进程或容器沙箱；
+- CI 覆盖 Python 3.11 / 3.12 / 3.13；
+- 发送失败不会重新运行 Agent；
+- Server / Worker / Sender 支持分角色部署和密钥隔离。
+
+下一步联调时，优先把 `.env` 配好，用 `doctor --live` 跑通模型和飞书凭据，再把 `/feishu/events` 配到飞书开放平台。
