@@ -56,6 +56,30 @@ set +a
 - `POST /feishu/events`：飞书事件入口；
 - `POST /v1/messages`：可选调试入口，生产默认关闭。
 
+## 分布式生产启动
+
+分布式模式需要 PostgreSQL，并将运行职责拆成三个命令：
+
+```bash
+kitty server --env-file .env.server
+kitty worker --env-file .env.worker
+kitty sender --env-file .env.sender
+```
+
+- `server`：只处理飞书 HTTP、验签、Inbox 落盘和快速确认；
+- `worker`：领取 Inbox、持有 Session Lease、运行 Agent、写入 Outbox；
+- `sender`：领取 Outbox、幂等发送飞书、独立重试和死信。
+
+查看和重放分布式任务：
+
+```bash
+KITTY_DATABASE_URL=postgresql://... kitty jobs
+KITTY_DATABASE_URL=postgresql://... kitty retry-job inbox JOB_ID
+KITTY_DATABASE_URL=postgresql://... kitty retry-job outbox JOB_ID
+```
+
+参见[分布式部署指南](docs/distributed-deployment.md)。
+
 ## 扩展点
 
 - `KITTY_SYSTEM_PROMPT`：机器人角色与回答规则；
@@ -83,3 +107,4 @@ kitty --state-dir /data/kitty --retry-delivery om_xxx
 - [事件协议](docs/event-protocol.md)
 - [10 分钟上线](docs/ten-minute-launch.md)
 - [飞书生产部署](docs/production-deployment.md)
+- [分布式部署](docs/distributed-deployment.md)

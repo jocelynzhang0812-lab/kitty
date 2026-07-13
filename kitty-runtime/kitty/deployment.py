@@ -10,6 +10,7 @@ from pathlib import Path
 from kitty.agent.providers.mock import MockProvider
 from kitty.agent.providers.openai_compatible import OpenAICompatibleProvider
 from kitty.core.config import KittyConfig
+from kitty.memory.base import SessionStore
 from kitty.runtime import KittyRuntime
 
 
@@ -81,7 +82,9 @@ class DeploymentSettings:
             hook_paths=_csv_env("KITTY_HOOK_PATHS"),
         )
 
-    def validate(self) -> None:
+    def validate(self, *, role: str = "combined") -> None:
+        if role not in {"combined", "worker"}:
+            raise ValueError("role must be combined or worker")
         errors: list[str] = []
         if self.environment not in {"development", "test", "production"}:
             errors.append("KITTY_ENV must be development, test, or production")
@@ -102,15 +105,20 @@ class DeploymentSettings:
 
         if self.environment == "production":
             required = {
-                "FEISHU_APP_ID": self.feishu_app_id,
-                "FEISHU_APP_SECRET": self.feishu_app_secret,
-                "FEISHU_VERIFICATION_TOKEN": self.feishu_verification_token,
-                "FEISHU_ENCRYPT_KEY": self.feishu_encrypt_key,
                 "LLM_API_KEY": self.model_api_key,
                 "LLM_MODEL": self.model_name,
                 "KITTY_BOT_NAME": self.bot_name,
-                "KITTY_PUBLIC_BASE_URL": self.public_base_url,
             }
+            if role == "combined":
+                required.update(
+                    {
+                        "FEISHU_APP_ID": self.feishu_app_id,
+                        "FEISHU_APP_SECRET": self.feishu_app_secret,
+                        "FEISHU_VERIFICATION_TOKEN": self.feishu_verification_token,
+                        "FEISHU_ENCRYPT_KEY": self.feishu_encrypt_key,
+                        "KITTY_PUBLIC_BASE_URL": self.public_base_url,
+                    }
+                )
             for name, value in required.items():
                 if not value:
                     errors.append(f"missing production setting: {name}")
@@ -145,8 +153,13 @@ class DeploymentSettings:
         }
 
 
-def build_runtime(settings: DeploymentSettings) -> KittyRuntime:
-    settings.validate()
+def build_runtime(
+    settings: DeploymentSettings,
+    *,
+    store: SessionStore | None = None,
+    validation_role: str = "combined",
+) -> KittyRuntime:
+    settings.validate(role=validation_role)
     config = KittyConfig.from_env()
     provider = (
         MockProvider()
@@ -162,6 +175,7 @@ def build_runtime(settings: DeploymentSettings) -> KittyRuntime:
         config=config,
         provider=provider,
         project_root=settings.project_root,
+        store=store,
     )
     _load_tool_modules(runtime, settings)
     for hook_path in settings.hook_paths:

@@ -19,7 +19,10 @@ from kitty.runtime import KittyRuntime
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Kitty Feishu bot runtime",
-        epilog="Start with `kitty setup`, verify with `kitty doctor --live`, then run `kitty serve`.",
+        epilog=(
+            "Single process: `kitty serve`. Distributed: "
+            "`kitty server`, `kitty worker`, and `kitty sender`."
+        ),
     )
     parser.add_argument("--session", default="cli-default", help="Local chat session identifier")
     parser.add_argument("--state-dir", default=".kitty", help="Runtime state directory")
@@ -46,6 +49,25 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--env-file", default=".env")
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8000)
+
+    server = commands.add_parser("server", help="Start stateless distributed ingress")
+    server.add_argument("--env-file", help="Optional configuration file")
+    server.add_argument("--host", default="0.0.0.0")
+    server.add_argument("--port", type=int, default=8000)
+
+    worker = commands.add_parser("worker", help="Start a distributed agent worker")
+    worker.add_argument("--env-file", help="Optional configuration file")
+
+    sender = commands.add_parser("sender", help="Start a distributed Feishu sender")
+    sender.add_argument("--env-file", help="Optional configuration file")
+
+    jobs = commands.add_parser("jobs", help="Show distributed inbox and outbox counts")
+    jobs.add_argument("--env-file", help="Optional configuration file")
+
+    retry_job = commands.add_parser("retry-job", help="Requeue one distributed dead job")
+    retry_job.add_argument("kind", choices=("inbox", "outbox"))
+    retry_job.add_argument("job_id")
+    retry_job.add_argument("--env-file", help="Optional configuration file")
     return parser
 
 
@@ -56,6 +78,16 @@ async def run_cli(args: argparse.Namespace) -> int:
         return await _run_doctor(args)
     if args.command == "serve":
         return await _run_serve(args)
+    if args.command == "server":
+        return await _run_distributed_server(args)
+    if args.command == "worker":
+        return await _run_distributed_worker(args)
+    if args.command == "sender":
+        return await _run_distributed_sender(args)
+    if args.command == "jobs":
+        return await _run_distributed_jobs(args)
+    if args.command == "retry-job":
+        return await _run_distributed_retry(args)
     return await _run_local_chat(args)
 
 
@@ -124,6 +156,74 @@ async def _run_serve(args: argparse.Namespace) -> int:
     )
     await server.serve()
     return 0
+
+
+async def _run_distributed_server(args: argparse.Namespace) -> int:
+    if args.env_file:
+        load_env_file(args.env_file)
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise RuntimeError("uvicorn is required; install the project dependencies") from exc
+    from kitty.distributed.ingress import create_ingress_app
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_ingress_app(),
+            host=args.host,
+            port=args.port,
+            proxy_headers=True,
+        )
+    )
+    await server.serve()
+    return 0
+
+
+async def _run_distributed_worker(args: argparse.Namespace) -> int:
+    if args.env_file:
+        load_env_file(args.env_file)
+    from kitty.distributed.worker import create_agent_worker
+
+    await create_agent_worker().run_forever()
+    return 0
+
+
+async def _run_distributed_sender(args: argparse.Namespace) -> int:
+    if args.env_file:
+        load_env_file(args.env_file)
+    from kitty.distributed.sender import create_sender
+
+    await create_sender().run_forever()
+    return 0
+
+
+def _distributed_store(env_file: str | None):
+    if env_file:
+        load_env_file(env_file)
+    from kitty.distributed.config import DistributedSettings
+    from kitty.memory.postgres_store import PostgresStore
+
+    return PostgresStore(DistributedSettings.from_env("operator").database_url)
+
+
+async def _run_distributed_jobs(args: argparse.Namespace) -> int:
+    store = _distributed_store(args.env_file)
+    try:
+        counts = await asyncio.to_thread(store.job_counts)
+        print(json.dumps(counts, ensure_ascii=False))
+    finally:
+        await asyncio.to_thread(store.close)
+    return 0
+
+
+async def _run_distributed_retry(args: argparse.Namespace) -> int:
+    store = _distributed_store(args.env_file)
+    try:
+        requeued = await asyncio.to_thread(store.requeue_dead, args.kind, args.job_id)
+        print(json.dumps({"kind": args.kind, "job_id": args.job_id, "requeued": requeued}))
+    finally:
+        await asyncio.to_thread(store.close)
+    return 0 if requeued else 1
 
 
 async def _run_local_chat(args: argparse.Namespace) -> int:

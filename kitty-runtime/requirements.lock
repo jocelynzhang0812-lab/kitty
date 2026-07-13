@@ -2,4 +2,7 @@
 click==8.4.2
 h11==0.16.0
 pycryptodome==3.23.0
+psycopg==3.3.4
+psycopg-binary==3.3.4
+psycopg-pool==3.3.1
 uvicorn==0.51.0

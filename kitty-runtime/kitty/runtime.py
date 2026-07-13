@@ -13,6 +13,7 @@ from kitty.core.context import AgentRecord
 from kitty.hooks.bus import HookBus
 from kitty.hooks.loader import LoadedHook, load_hook
 from kitty.memory.file_context import FileContext
+from kitty.memory.base import SessionStore
 from kitty.memory.session_store import SQLiteSessionStore
 from kitty.skills.loader import SkillCatalog
 from kitty.tools.registry import ToolRegistry
@@ -33,6 +34,7 @@ class KittyRuntime:
         hooks: HookBus | None = None,
         skills: SkillCatalog | None = None,
         turn_handler: TurnHandler | None = None,
+        store: SessionStore | None = None,
     ):
         self.config = config or KittyConfig.from_env()
         self.config.ensure_dirs()
@@ -44,7 +46,7 @@ class KittyRuntime:
         self.hooks = hooks or HookBus(self.config.hook_timeout_seconds)
         self.skills = skills if skills is not None else SkillCatalog.discover(self.project_root)
         self.file_context = FileContext.load(self.project_root)
-        self.store = SQLiteSessionStore(self.config.session_db_path)
+        self.store: SessionStore = store or SQLiteSessionStore(self.config.session_db_path)
         system_prompt = self.config.system_prompt
         rendered_file_context = self.file_context.render()
         if rendered_file_context:

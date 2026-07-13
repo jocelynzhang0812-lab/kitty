@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: kitty
+      POSTGRES_USER: kitty
+      POSTGRES_PASSWORD: kitty-local-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kitty -d kitty"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - kitty-postgres:/var/lib/postgresql/data
+
+  server:
+    build:
+      context: .
+      dockerfile: kitty-runtime/Dockerfile
+    command: ["kitty", "server", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: kitty-runtime/.env.server
+    environment:
+      KITTY_DATABASE_URL: postgresql://kitty:kitty-local-only@postgres:5432/kitty
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: kitty-runtime/Dockerfile
+    command: ["kitty", "worker"]
+    env_file: kitty-runtime/.env.worker
+    environment:
+      KITTY_DATABASE_URL: postgresql://kitty:kitty-local-only@postgres:5432/kitty
+      KITTY_PROJECT_ROOT: /app/kitty-runtime
+      KITTY_STATE_DIR: /data/kitty
+      KITTY_WORKSPACE_ROOT: /data/kitty/workspaces
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - kitty-worker-data:/data/kitty
+
+  sender:
+    build:
+      context: .
+      dockerfile: kitty-runtime/Dockerfile
+    command: ["kitty", "sender"]
+    env_file: kitty-runtime/.env.sender
+    environment:
+      KITTY_DATABASE_URL: postgresql://kitty:kitty-local-only@postgres:5432/kitty
+      KITTY_WORKER_CONCURRENCY: "2"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  kitty-postgres:
+  kitty-worker-data:

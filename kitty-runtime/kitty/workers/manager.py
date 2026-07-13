@@ -6,7 +6,7 @@ from pathlib import Path
 from kitty.agent.handler import TurnHandler
 from kitty.core.context import AgentRecord
 from kitty.hooks.bus import HookBus
-from kitty.memory.session_store import SQLiteSessionStore
+from kitty.memory.base import SessionStore
 from kitty.workers.worker import SessionWorker, WorkerResult
 
 
@@ -16,7 +16,7 @@ class WorkerManager:
         *,
         agent: TurnHandler,
         hooks: HookBus,
-        store: SQLiteSessionStore,
+        store: SessionStore,
         workspace_root: Path,
         log_dir: Path,
     ):

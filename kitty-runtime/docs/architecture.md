@@ -47,7 +47,22 @@ MEMORY.md
 ## 部署约束
 
 - SQLite 文件必须挂载持久卷；
-- 当前版本按单实例设计；
+- SQLite 模式按单实例设计；
 - HTTPS 由网关或反向代理终止；
 - 流量探针使用 `/ready`，进程探针使用 `/health`；
 - 密钥只从运行环境注入。
+
+## 分布式模式
+
+```text
+Feishu -> Server -> PostgreSQL Inbox
+                       -> Agent Worker -> PostgreSQL Session + Outbox
+                                                -> Sender -> Feishu
+```
+
+- Server、Agent Worker 和 Sender 是独立进程，可分别扩容；
+- `FOR UPDATE SKIP LOCKED` 保证任务只被一个实例领取；
+- Session Lease 保证同一会话串行，fencing token 阻止失去租约的 Worker 回写；
+- 任务租约过期后由其他实例自动恢复；
+- Outbox 使用稳定 UUID 重试，发送失败不会重新运行模型；
+- Worker 工作目录需要共享持久卷，或工具必须保持无本地状态。

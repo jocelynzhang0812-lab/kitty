@@ -10,6 +10,10 @@ dist/
 .env
 .env.*
 !.env.production.example
+!.env.server.example
+!.env.worker.example
+!.env.sender.example
 .kitty/
+.kitty-distributed/
 *.db-shm
 *.db-wal

@@ -12,7 +12,7 @@ from kitty.agent.handler import TurnHandler
 from kitty.core.context import AgentRecord, HookContext, RecordMeta
 from kitty.core.events import EventType, SessionEvent, WireType
 from kitty.hooks.bus import HookBus
-from kitty.memory.session_store import SQLiteSessionStore
+from kitty.memory.base import SessionStore
 
 
 @dataclass(slots=True, frozen=True)
@@ -65,7 +65,7 @@ class SessionWorker:
         *,
         agent: TurnHandler,
         hooks: HookBus,
-        store: SQLiteSessionStore,
+        store: SessionStore,
         workspace_root: Path,
         log_dir: Path,
         max_history_messages: int = 200,

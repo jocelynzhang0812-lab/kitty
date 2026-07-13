@@ -27,6 +27,17 @@ class DeploymentSettingsTests(unittest.TestCase):
         self.assertIn("LLM_API_KEY", message)
         self.assertIn("mock model provider is forbidden", message)
 
+    def test_distributed_worker_does_not_require_feishu_secrets(self):
+        settings = DeploymentSettings(
+            environment="production",
+            project_root=Path(__file__).resolve().parents[1],
+            bot_name="Worker Bot",
+            model_provider="openai_compatible",
+            model_api_key="model-secret",
+            model_name="test-model",
+        )
+        settings.validate(role="worker")
+
     def test_loads_generic_tool_and_hook_extensions(self):
         root = Path(__file__).resolve().parents[1]
         settings = DeploymentSettings(
