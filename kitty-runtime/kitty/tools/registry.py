@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from kitty.tools.executor import (
+    ContainerSandboxConfig,
+    ContainerToolExecutor,
     InProcessToolExecutor,
     SubprocessToolExecutor,
     ToolExecution,
@@ -48,9 +50,10 @@ class ToolRegistry:
         default_executor: str = "in_process",
         policy: ToolPolicy | None = None,
         subprocess_max_output_bytes: int = 65536,
+        container_sandbox: ContainerSandboxConfig | None = None,
     ):
-        if default_executor not in {"in_process", "subprocess"}:
-            raise ValueError("default_executor must be in_process or subprocess")
+        if default_executor not in {"in_process", "subprocess", "container"}:
+            raise ValueError("default_executor must be in_process, subprocess, or container")
         self.default_timeout_seconds = default_timeout_seconds
         self.allowlist = frozenset(allowlist) if allowlist is not None else None
         self.policy = policy or ToolPolicy(
@@ -61,6 +64,13 @@ class ToolRegistry:
             "in_process": InProcessToolExecutor(),
             "subprocess": SubprocessToolExecutor(max_output_bytes=subprocess_max_output_bytes),
         }
+        if container_sandbox is not None and container_sandbox.image:
+            self._executors["container"] = ContainerToolExecutor(
+                container_sandbox,
+                max_output_bytes=subprocess_max_output_bytes,
+            )
+        if default_executor == "container" and "container" not in self._executors:
+            raise ValueError("container executor requires KITTY_TOOL_CONTAINER_IMAGE")
         self._tools: dict[str, ToolSpec] = {}
 
     def register(self, spec: ToolSpec) -> None:
@@ -79,8 +89,8 @@ class ToolRegistry:
         executor: str | None = None,
         handler_ref: str = "",
     ) -> ToolSpec:
-        if executor is not None and executor not in self._executors:
-            raise ValueError("executor must be in_process or subprocess")
+        if executor is not None and executor not in {"in_process", "subprocess", "container"}:
+            raise ValueError("executor must be in_process, subprocess, or container")
         spec = ToolSpec(
             name=name,
             description=description,

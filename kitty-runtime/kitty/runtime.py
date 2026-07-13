@@ -16,6 +16,7 @@ from kitty.memory.file_context import FileContext
 from kitty.memory.base import SessionStore
 from kitty.memory.session_store import SQLiteSessionStore
 from kitty.skills.loader import SkillCatalog
+from kitty.tools.executor import ContainerSandboxConfig
 from kitty.tools.registry import ToolRegistry
 from kitty.workers.manager import WorkerManager
 from kitty.workers.worker import WorkerResult
@@ -45,6 +46,16 @@ class KittyRuntime:
             default_executor=self.config.tool_executor,
             denylist=self.config.tool_denylist,
             subprocess_max_output_bytes=self.config.tool_max_output_bytes,
+            container_sandbox=ContainerSandboxConfig(
+                image=self.config.tool_container_image,
+                workspace_root=self.config.tool_container_workspace,
+                network=self.config.tool_container_network,
+                memory=self.config.tool_container_memory,
+                cpus=self.config.tool_container_cpus,
+                pids_limit=self.config.tool_container_pids_limit,
+                tmpfs_size=self.config.tool_container_tmpfs_size,
+                extra_readonly_mounts=self.config.tool_container_readonly_mounts,
+            ),
         )
         self.hooks = hooks or HookBus(self.config.hook_timeout_seconds)
         self.skills = skills if skills is not None else SkillCatalog.discover(self.project_root)

@@ -60,6 +60,12 @@ KITTY_DELIVERY_RETRY_BASE_SECONDS=1
 KITTY_TOOL_EXECUTOR=subprocess
 KITTY_TOOL_DENYLIST=
 KITTY_TOOL_MAX_OUTPUT_BYTES=65536
+KITTY_TOOL_CONTAINER_IMAGE=
+KITTY_TOOL_CONTAINER_NETWORK=none
+KITTY_TOOL_CONTAINER_MEMORY=256m
+KITTY_TOOL_CONTAINER_CPUS=1
+KITTY_TOOL_CONTAINER_PIDS_LIMIT=128
+KITTY_TOOL_CONTAINER_TMPFS_SIZE=64m
 ```
 
 生产环境不要使用 Compose 示例中的数据库密码，应改用 Secret Manager 或平台密钥注入。
@@ -85,6 +91,21 @@ KITTY_TOOL_DENYLIST=dangerous_tool
 ```
 
 `subprocess` 模式会为每次工具调用启动独立 Python 子进程；工具超时后，Worker 会终止该子进程并把超时错误写回模型上下文。该版本隔离的是 Python 进程生命周期和 stdout 协议，尚不是容器级权限沙箱。
+
+需要容器级边界时，切换为：
+
+```text
+KITTY_TOOL_EXECUTOR=container
+KITTY_TOOL_CONTAINER_IMAGE=kitty-runtime:latest
+KITTY_TOOL_CONTAINER_WORKSPACE=/app/kitty-runtime
+KITTY_TOOL_CONTAINER_NETWORK=none
+KITTY_TOOL_CONTAINER_MEMORY=256m
+KITTY_TOOL_CONTAINER_CPUS=1
+KITTY_TOOL_CONTAINER_PIDS_LIMIT=128
+KITTY_TOOL_CONTAINER_TMPFS_SIZE=64m
+```
+
+容器模式会执行 `docker run --rm -i`，并默认使用无网络、只读根文件系统、`--cap-drop ALL`、`no-new-privileges`、进程数限制、CPU/内存限制和 tmpfs `/tmp`。如果工具需要只读证书或模型文件，可以通过 `KITTY_TOOL_CONTAINER_READONLY_MOUNTS=/host/path:/container/path` 显式挂载。
 
 工具 handler 必须是可导入函数。推荐写法：
 

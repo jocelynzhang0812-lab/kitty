@@ -65,5 +65,5 @@ Feishu -> Server -> PostgreSQL Inbox
 - Session Lease 保证同一会话串行，fencing token 阻止失去租约的 Worker 回写；
 - 任务租约过期后由其他实例自动恢复；
 - Outbox 使用稳定 UUID 重试，发送失败不会重新运行模型；
-- Worker 工具可通过 `KITTY_TOOL_EXECUTOR=subprocess` 放入独立 Python 子进程执行；
+- Worker 工具可通过 `KITTY_TOOL_EXECUTOR=subprocess` 放入独立 Python 子进程执行，或通过 `KITTY_TOOL_EXECUTOR=container` 放入短生命周期 Docker 沙箱；
 - Worker 工作目录需要共享持久卷，或工具必须保持无本地状态。

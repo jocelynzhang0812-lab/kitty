@@ -87,11 +87,14 @@ KITTY_DATABASE_URL=postgresql://... kitty retry-job outbox JOB_ID
 - `KITTY_TOOL_EXECUTOR`：`in_process` 或 `subprocess`，生产 Worker 推荐 `subprocess`；
 - `KITTY_TOOL_DENYLIST`：逗号分隔的运行时禁用工具名；
 - `KITTY_TOOL_MAX_OUTPUT_BYTES`：单次工具结果写回模型前的最大 JSON 字节数；
+- `KITTY_TOOL_CONTAINER_IMAGE`：`KITTY_TOOL_EXECUTOR=container` 时使用的工具沙箱镜像；
 - `KITTY_HOOK_PATHS`：加载监听生命周期事件的 Python Hook；
 - `.agents/*/skills/*/SKILL.md`：按用户消息选择并注入 Skills；
 - `AGENTS.md` / `MEMORY.md`：从 `KITTY_PROJECT_ROOT` 只读加载项目上下文。
 
 `subprocess` 模式会为每次工具调用启动独立 Python 子进程，并在超时后直接终止该子进程。该模式要求工具 handler 是可导入函数；lambda 或闭包需要在注册时提供 `handler_ref="module:function"`。
+
+`container` 模式会通过短生命周期 Docker 容器运行同一个工具协议，默认无网络、只读根文件系统、无新增权限，并设置 CPU、内存、进程数和 tmpfs 限制。它需要配置 `KITTY_TOOL_CONTAINER_IMAGE`，且运行 Worker 的环境必须能启动 Docker 容器。
 
 中性示例位于 `examples/tools.py` 和 `examples/echo_hook.py`。
 

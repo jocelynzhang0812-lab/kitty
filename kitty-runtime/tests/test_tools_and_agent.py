@@ -8,6 +8,7 @@ from kitty.agent.loop import AgentLoop
 from kitty.agent.providers.base import ModelResponse, ModelToolCall
 from kitty.core.config import KittyConfig
 from kitty.runtime import KittyRuntime
+from kitty.tools.executor import ContainerSandboxConfig, ContainerToolExecutor
 from kitty.tools.registry import ToolRegistry
 
 
@@ -174,3 +175,67 @@ class ToolAndAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.config.tool_executor, "subprocess")
         self.assertEqual(runtime.config.tool_denylist, ("blocked", "dangerous"))
         self.assertEqual(runtime.config.tool_max_output_bytes, 2048)
+
+    def test_container_sandbox_command_uses_restricted_docker_options(self):
+        executor = ContainerToolExecutor(
+            ContainerSandboxConfig(
+                image="kitty-runtime:latest",
+                workspace_root="/srv/kitty",
+                memory="128m",
+                cpus="0.5",
+                pids_limit=32,
+                tmpfs_size="16m",
+                extra_readonly_mounts=("/etc/ssl/certs:/etc/ssl/certs",),
+            )
+        )
+
+        command = executor.build_command()
+
+        self.assertEqual(command[:3], ("docker", "run", "--rm"))
+        self.assertIn("--network", command)
+        self.assertIn("none", command)
+        self.assertIn("--read-only", command)
+        self.assertIn("--cap-drop", command)
+        self.assertIn("ALL", command)
+        self.assertIn("no-new-privileges", command)
+        self.assertIn("--pids-limit", command)
+        self.assertIn("32", command)
+        self.assertIn("--memory", command)
+        self.assertIn("128m", command)
+        self.assertIn("--cpus", command)
+        self.assertIn("0.5", command)
+        self.assertIn("type=bind,source=/srv/kitty,target=/workspace,readonly", command)
+        self.assertIn("type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly", command)
+        self.assertEqual(command[-4:], ("kitty-runtime:latest", "python", "-m", "kitty.tools.subprocess_runner"))
+
+    def test_container_executor_requires_image_when_selected(self):
+        with self.assertRaisesRegex(ValueError, "container executor requires"):
+            ToolRegistry(default_executor="container")
+
+    def test_container_executor_environment_validation(self):
+        with TemporaryDirectory() as tmpdir:
+            env = {
+                "KITTY_STATE_DIR": str(Path(tmpdir) / "state"),
+                "KITTY_TOOL_EXECUTOR": "container",
+                "KITTY_TOOL_CONTAINER_IMAGE": "kitty-runtime:latest",
+                "KITTY_TOOL_CONTAINER_WORKSPACE": "/workspace/project",
+                "KITTY_TOOL_CONTAINER_MEMORY": "128m",
+                "KITTY_TOOL_CONTAINER_CPUS": "0.5",
+                "KITTY_TOOL_CONTAINER_PIDS_LIMIT": "32",
+                "KITTY_TOOL_CONTAINER_TMPFS_SIZE": "16m",
+                "KITTY_TOOL_CONTAINER_READONLY_MOUNTS": "/etc/ssl/certs:/etc/ssl/certs",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                config = KittyConfig.from_env()
+
+        self.assertEqual(config.tool_executor, "container")
+        self.assertEqual(config.tool_container_image, "kitty-runtime:latest")
+        self.assertEqual(config.tool_container_workspace, "/workspace/project")
+        self.assertEqual(config.tool_container_memory, "128m")
+        self.assertEqual(config.tool_container_cpus, "0.5")
+        self.assertEqual(config.tool_container_pids_limit, 32)
+        self.assertEqual(config.tool_container_tmpfs_size, "16m")
+        self.assertEqual(
+            config.tool_container_readonly_mounts,
+            ("/etc/ssl/certs:/etc/ssl/certs",),
+        )

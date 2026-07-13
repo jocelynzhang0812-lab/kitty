@@ -116,6 +116,18 @@ KITTY_TOOL_DENYLIST=dangerous_tool
 
 使用 subprocess 模式时，工具 handler 必须是可导入函数；如果使用 lambda 或闭包，需要在 `registry.add(..., handler_ref="module:function")` 中显式提供导入路径。
 
+更严格的生产隔离可以切到容器执行：
+
+```text
+KITTY_TOOL_EXECUTOR=container
+KITTY_TOOL_CONTAINER_IMAGE=kitty-runtime:latest
+KITTY_TOOL_CONTAINER_NETWORK=none
+KITTY_TOOL_CONTAINER_MEMORY=256m
+KITTY_TOOL_CONTAINER_CPUS=1
+```
+
+容器模式会使用短生命周期 Docker 容器执行工具，默认无网络、只读根文件系统、丢弃 Linux capabilities，并设置进程数、CPU、内存和 tmpfs 限制。
+
 ## 飞书生产运行
 
 推荐先运行向导：

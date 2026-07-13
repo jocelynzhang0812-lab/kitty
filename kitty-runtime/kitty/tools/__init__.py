@@ -1,4 +1,6 @@
 from kitty.tools.executor import (
+    ContainerSandboxConfig,
+    ContainerToolExecutor,
     InProcessToolExecutor,
     SubprocessToolExecutor,
     ToolExecution,
@@ -7,6 +9,8 @@ from kitty.tools.executor import (
 from kitty.tools.registry import ToolRegistry, ToolSpec
 
 __all__ = [
+    "ContainerSandboxConfig",
+    "ContainerToolExecutor",
     "InProcessToolExecutor",
     "SubprocessToolExecutor",
     "ToolExecution",
