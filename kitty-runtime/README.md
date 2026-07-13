@@ -84,9 +84,14 @@ KITTY_DATABASE_URL=postgresql://... kitty retry-job outbox JOB_ID
 
 - `KITTY_SYSTEM_PROMPT`：机器人角色与回答规则；
 - `KITTY_TOOL_MODULES`：加载实现 `register_tools(registry)` 的 Python 模块；
+- `KITTY_TOOL_EXECUTOR`：`in_process` 或 `subprocess`，生产 Worker 推荐 `subprocess`；
+- `KITTY_TOOL_DENYLIST`：逗号分隔的运行时禁用工具名；
+- `KITTY_TOOL_MAX_OUTPUT_BYTES`：单次工具结果写回模型前的最大 JSON 字节数；
 - `KITTY_HOOK_PATHS`：加载监听生命周期事件的 Python Hook；
 - `.agents/*/skills/*/SKILL.md`：按用户消息选择并注入 Skills；
 - `AGENTS.md` / `MEMORY.md`：从 `KITTY_PROJECT_ROOT` 只读加载项目上下文。
+
+`subprocess` 模式会为每次工具调用启动独立 Python 子进程，并在超时后直接终止该子进程。该模式要求工具 handler 是可导入函数；lambda 或闭包需要在注册时提供 `handler_ref="module:function"`。
 
 中性示例位于 `examples/tools.py` 和 `examples/echo_hook.py`。
 

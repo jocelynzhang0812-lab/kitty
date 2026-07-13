@@ -57,6 +57,9 @@ KITTY_JOB_LEASE_SECONDS=180
 KITTY_POLL_INTERVAL_SECONDS=0.25
 KITTY_DELIVERY_MAX_ATTEMPTS=5
 KITTY_DELIVERY_RETRY_BASE_SECONDS=1
+KITTY_TOOL_EXECUTOR=subprocess
+KITTY_TOOL_DENYLIST=
+KITTY_TOOL_MAX_OUTPUT_BYTES=65536
 ```
 
 生产环境不要使用 Compose 示例中的数据库密码，应改用 Secret Manager 或平台密钥注入。
@@ -70,6 +73,35 @@ KITTY_DELIVERY_RETRY_BASE_SECONDS=1
 - Worker 或 Sender 崩溃后，租约到期的任务会被其他实例领取；
 - Sender 对同一个 Outbox Job 始终使用同一个飞书 UUID；
 - 回复在 Outbox 中持久化，因此发送重试不会重新调用模型和工具。
+
+## 工具隔离
+
+生产 Worker 推荐启用：
+
+```text
+KITTY_TOOL_EXECUTOR=subprocess
+KITTY_TOOL_MAX_OUTPUT_BYTES=65536
+KITTY_TOOL_DENYLIST=dangerous_tool
+```
+
+`subprocess` 模式会为每次工具调用启动独立 Python 子进程；工具超时后，Worker 会终止该子进程并把超时错误写回模型上下文。该版本隔离的是 Python 进程生命周期和 stdout 协议，尚不是容器级权限沙箱。
+
+工具 handler 必须是可导入函数。推荐写法：
+
+```python
+def lookup_order(order_id: str) -> dict:
+    ...
+
+
+def register_tools(registry):
+    registry.add("lookup_order", lookup_order)
+```
+
+如果注册时使用 wrapper、lambda 或闭包，需要显式给出导入路径：
+
+```python
+registry.add("lookup_order", lambda order_id: lookup_order(order_id), handler_ref="my_bot.tools:lookup_order")
+```
 
 ## 工作目录
 

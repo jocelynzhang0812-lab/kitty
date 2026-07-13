@@ -1,8 +1,13 @@
 import unittest
 import time
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from kitty.agent.loop import AgentLoop
 from kitty.agent.providers.base import ModelResponse, ModelToolCall
+from kitty.core.config import KittyConfig
+from kitty.runtime import KittyRuntime
 from kitty.tools.registry import ToolRegistry
 
 
@@ -92,3 +97,80 @@ class ToolAndAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.ok)
         self.assertIn("timed out", result.error)
         self.assertLess(elapsed, 0.08)
+
+    async def test_subprocess_executor_runs_importable_tool(self):
+        registry = ToolRegistry(default_executor="subprocess")
+        registry.add(
+            "add",
+            lambda a, b: a + b,
+            handler_ref="tests.fixtures.tool_module:add",
+        )
+
+        result = await registry.execute("add", {"a": 2, "b": 4})
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.output, 6)
+
+    async def test_subprocess_executor_handles_async_tools_and_stdout_noise(self):
+        registry = ToolRegistry(default_executor="subprocess")
+        registry.add("upper", lambda value: value, handler_ref="tests.fixtures.tool_module:async_upper")
+        registry.add("noisy", lambda value: value, handler_ref="tests.fixtures.tool_module:noisy")
+
+        upper = await registry.execute("upper", {"value": "kitty"})
+        noisy = await registry.execute("noisy", {"value": "ok"})
+
+        self.assertTrue(upper.ok)
+        self.assertEqual(upper.output, "KITTY")
+        self.assertTrue(noisy.ok)
+        self.assertEqual(noisy.output, {"value": "ok"})
+
+    async def test_subprocess_executor_times_out_and_kills_child(self):
+        registry = ToolRegistry(default_timeout_seconds=0.05, default_executor="subprocess")
+        registry.add("sleep", lambda seconds: seconds, handler_ref="tests.fixtures.tool_module:sleep_for")
+        started = time.monotonic()
+
+        result = await registry.execute("sleep", {"seconds": 1.0})
+        elapsed = time.monotonic() - started
+
+        self.assertFalse(result.ok)
+        self.assertIn("timed out", result.error)
+        self.assertLess(elapsed, 0.5)
+
+    async def test_subprocess_executor_requires_importable_handler(self):
+        registry = ToolRegistry(default_executor="subprocess")
+        registry.add("local", lambda value: value)
+
+        result = await registry.execute("local", {"value": "x"})
+
+        self.assertFalse(result.ok)
+        self.assertIn("not subprocess-capable", result.error)
+
+    async def test_tool_policy_denylist(self):
+        registry = ToolRegistry(denylist=["blocked"])
+        registry.add("blocked", lambda: True)
+        registry.add("safe", lambda: True)
+
+        result = await registry.execute("blocked")
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "tool is denied by policy")
+        self.assertEqual(
+            [schema["function"]["name"] for schema in registry.schemas()],
+            ["safe"],
+        )
+
+    async def test_runtime_reads_tool_executor_environment(self):
+        with TemporaryDirectory() as tmpdir:
+            env = {
+                "KITTY_STATE_DIR": str(Path(tmpdir) / "state"),
+                "KITTY_TOOL_EXECUTOR": "subprocess",
+                "KITTY_TOOL_DENYLIST": "blocked, dangerous",
+                "KITTY_TOOL_MAX_OUTPUT_BYTES": "2048",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                config = KittyConfig.from_env()
+                runtime = KittyRuntime(config=config, project_root=Path.cwd())
+
+        self.assertEqual(runtime.config.tool_executor, "subprocess")
+        self.assertEqual(runtime.config.tool_denylist, ("blocked", "dangerous"))
+        self.assertEqual(runtime.config.tool_max_output_bytes, 2048)

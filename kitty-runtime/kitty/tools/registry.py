@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-import asyncio
-import inspect
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass
 from typing import Any
+
+from kitty.tools.executor import (
+    InProcessToolExecutor,
+    SubprocessToolExecutor,
+    ToolExecution,
+    ToolPolicy,
+)
 
 
 ToolHandler = Callable[..., Awaitable[Any] | Any]
@@ -17,6 +22,8 @@ class ToolSpec:
     parameters: dict[str, Any]
     handler: ToolHandler
     timeout_seconds: float | None = None
+    executor: str | None = None
+    handler_ref: str = ""
 
     def to_model_schema(self) -> dict[str, Any]:
         return {
@@ -29,48 +36,31 @@ class ToolSpec:
         }
 
 
-@dataclass(slots=True, frozen=True)
-class ToolExecution:
-    name: str
-    ok: bool
-    output: Any = None
-    error: str = ""
-
-    def model_payload(self) -> dict[str, Any]:
-        return {
-            "ok": self.ok,
-            "output": _jsonable(self.output),
-            "error": self.error,
-        }
-
-
-def _jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if is_dataclass(value):
-        return _jsonable(asdict(value))
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item) for item in value]
-    if hasattr(value, "value") and isinstance(value.value, (str, int, float, bool)):
-        return value.value
-    if hasattr(value, "__dict__"):
-        return _jsonable(vars(value))
-    return str(value)
-
-
 class ToolRegistry:
-    """Runtime tool registry with allow-listing and timeout isolation."""
+    """Runtime tool registry with policy, validation, and pluggable execution."""
 
     def __init__(
         self,
         *,
         default_timeout_seconds: float = 30.0,
         allowlist: Iterable[str] | None = None,
+        denylist: Iterable[str] | None = None,
+        default_executor: str = "in_process",
+        policy: ToolPolicy | None = None,
+        subprocess_max_output_bytes: int = 65536,
     ):
+        if default_executor not in {"in_process", "subprocess"}:
+            raise ValueError("default_executor must be in_process or subprocess")
         self.default_timeout_seconds = default_timeout_seconds
         self.allowlist = frozenset(allowlist) if allowlist is not None else None
+        self.policy = policy or ToolPolicy(
+            denylist=frozenset(denylist) if denylist is not None else frozenset()
+        )
+        self.default_executor = default_executor
+        self._executors = {
+            "in_process": InProcessToolExecutor(),
+            "subprocess": SubprocessToolExecutor(max_output_bytes=subprocess_max_output_bytes),
+        }
         self._tools: dict[str, ToolSpec] = {}
 
     def register(self, spec: ToolSpec) -> None:
@@ -86,13 +76,19 @@ class ToolRegistry:
         description: str = "",
         parameters: dict[str, Any] | None = None,
         timeout_seconds: float | None = None,
+        executor: str | None = None,
+        handler_ref: str = "",
     ) -> ToolSpec:
+        if executor is not None and executor not in self._executors:
+            raise ValueError("executor must be in_process or subprocess")
         spec = ToolSpec(
             name=name,
             description=description,
             parameters=parameters or {"type": "object", "properties": {}},
             handler=handler,
             timeout_seconds=timeout_seconds,
+            executor=executor,
+            handler_ref=handler_ref,
         )
         self.register(spec)
         return spec
@@ -102,11 +98,15 @@ class ToolRegistry:
             spec.to_model_schema()
             for name, spec in self._tools.items()
             if self.allowlist is None or name in self.allowlist
+            if not self.policy.check(name)
         ]
 
     async def execute(self, name: str, arguments: Mapping[str, Any] | None = None) -> ToolExecution:
         if self.allowlist is not None and name not in self.allowlist:
             return ToolExecution(name=name, ok=False, error="tool is not allowed")
+        policy_error = self.policy.check(name)
+        if policy_error:
+            return ToolExecution(name=name, ok=False, error=policy_error)
         spec = self._tools.get(name)
         if spec is None:
             return ToolExecution(name=name, ok=False, error="tool is not registered")
@@ -114,22 +114,12 @@ class ToolRegistry:
         validation_error = self._validate(spec, args)
         if validation_error:
             return ToolExecution(name=name, ok=False, error=validation_error)
-        try:
-            timeout = spec.timeout_seconds or self.default_timeout_seconds
-            if inspect.iscoroutinefunction(spec.handler):
-                value = await asyncio.wait_for(spec.handler(**args), timeout=timeout)
-            else:
-                value = await asyncio.wait_for(
-                    asyncio.to_thread(spec.handler, **args),
-                    timeout=timeout,
-                )
-                if inspect.isawaitable(value):
-                    value = await asyncio.wait_for(value, timeout=timeout)
-            return ToolExecution(name=name, ok=True, output=value)
-        except TimeoutError:
-            return ToolExecution(name=name, ok=False, error="tool execution timed out")
-        except Exception as exc:
-            return ToolExecution(name=name, ok=False, error=f"{type(exc).__name__}: {exc}")
+        timeout = spec.timeout_seconds or self.default_timeout_seconds
+        executor_name = spec.executor or self.default_executor
+        executor = self._executors.get(executor_name)
+        if executor is None:
+            return ToolExecution(name=name, ok=False, error=f"unknown tool executor: {executor_name}")
+        return await executor.execute(spec, args, timeout)
 
     @staticmethod
     def _validate(spec: ToolSpec, arguments: Mapping[str, Any]) -> str:

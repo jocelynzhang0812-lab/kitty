@@ -78,10 +78,14 @@ python3 -m venv .venv
 from kitty.tools.registry import ToolRegistry
 
 
+def add(a: float, b: float) -> float:
+    return a + b
+
+
 def register_tools(registry: ToolRegistry) -> None:
     registry.add(
         "add",
-        lambda a, b: a + b,
+        add,
         description="Add two numbers.",
         parameters={
             "type": "object",
@@ -101,6 +105,16 @@ KITTY_TOOL_MODULES=examples.tools,my_bot.tools
 KITTY_HOOK_PATHS=examples/echo_hook.py,my_bot/audit_hook.py
 KITTY_SYSTEM_PROMPT=You are our internal Feishu assistant.
 ```
+
+Worker 可以把工具放到独立 Python 子进程执行：
+
+```text
+KITTY_TOOL_EXECUTOR=subprocess
+KITTY_TOOL_MAX_OUTPUT_BYTES=65536
+KITTY_TOOL_DENYLIST=dangerous_tool
+```
+
+使用 subprocess 模式时，工具 handler 必须是可导入函数；如果使用 lambda 或闭包，需要在 `registry.add(..., handler_ref="module:function")` 中显式提供导入路径。
 
 ## 飞书生产运行
 

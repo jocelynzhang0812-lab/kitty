@@ -41,7 +41,10 @@ class KittyRuntime:
         self.project_root = Path(project_root or Path.cwd()).expanduser().resolve()
         self.provider = provider or MockProvider()
         self.tools = tools or ToolRegistry(
-            default_timeout_seconds=self.config.tool_timeout_seconds
+            default_timeout_seconds=self.config.tool_timeout_seconds,
+            default_executor=self.config.tool_executor,
+            denylist=self.config.tool_denylist,
+            subprocess_max_output_bytes=self.config.tool_max_output_bytes,
         )
         self.hooks = hooks or HookBus(self.config.hook_timeout_seconds)
         self.skills = skills if skills is not None else SkillCatalog.discover(self.project_root)
