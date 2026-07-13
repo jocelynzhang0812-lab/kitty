@@ -190,9 +190,13 @@ Kitty 的劣势也很明确：
 ```bash
 git clone https://github.com/jocelynzhang0812-lab/kitty.git
 cd kitty/kitty-runtime
-python3 -m venv .venv
+# Kitty requires Python 3.11+.
+# On macOS, install it first if `python3 --version` is still 3.9:
+# brew install python@3.12
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
 .venv/bin/pip install -r requirements.lock
-.venv/bin/pip install --no-deps -e .
+.venv/bin/pip install .
 ```
 
 启动配置向导：
