@@ -1,12 +1,13 @@
 import asyncio
 import json
 import os
+import socket
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from kitty.cli import build_parser, run_cli
+from kitty.cli import _choose_setup_port, build_parser, run_cli
 from kitty.config_file import EnvFileError, load_env_file, write_env_file
 from kitty.onboarding import OnboardingASGIApp, OnboardingService
 
@@ -185,6 +186,17 @@ class OnboardingAppTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CliTests(unittest.IsolatedAsyncioTestCase):
+    async def test_setup_port_skips_busy_port(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen()
+            busy_port = sock.getsockname()[1]
+
+            selected = _choose_setup_port("127.0.0.1", busy_port)
+
+        self.assertNotEqual(selected, busy_port)
+        self.assertGreater(selected, busy_port)
+
     async def test_doctor_command_uses_saved_configuration(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(__file__).resolve().parents[1]

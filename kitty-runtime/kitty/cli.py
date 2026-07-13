@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import secrets
+import socket
 import sys
 import webbrowser
 from pathlib import Path
@@ -107,17 +108,40 @@ async def _run_setup(args: argparse.Namespace) -> int:
     service = OnboardingService(project_root=project_root, output_path=output)
     app = OnboardingASGIApp(service, setup_token=token)
     host_for_url = "127.0.0.1" if args.host == "::1" else args.host
-    url = f"http://{host_for_url}:{args.port}/?token={token}"
-    print("\nKitty setup is ready. Secrets stay on this machine.")
-    print(url)
-    print("Press Ctrl+C when setup is complete.\n")
+    port = _choose_setup_port(args.host, args.port)
+    url = f"http://{host_for_url}:{port}/?token={token}"
+    print("\nKitty setup is ready. Secrets stay on this machine.", flush=True)
+    if port != args.port:
+        print(f"Port {args.port} is busy; using {port} instead.", flush=True)
+    print(url, flush=True)
+    print("Press Ctrl+C when setup is complete.\n", flush=True)
     if not args.no_open:
         await asyncio.to_thread(webbrowser.open, url)
     server = uvicorn.Server(
-        uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
+        uvicorn.Config(app, host=args.host, port=port, log_level="warning")
     )
     await server.serve()
     return 0
+
+
+def _choose_setup_port(host: str, requested_port: int) -> int:
+    for port in range(requested_port, requested_port + 50):
+        if _can_bind(host, port):
+            return port
+    raise RuntimeError(
+        f"no available setup port found from {requested_port} to {requested_port + 49}"
+    )
+
+
+def _can_bind(host: str, port: int) -> bool:
+    family = socket.AF_INET6 if host == "::1" else socket.AF_INET
+    bind_host = "127.0.0.1" if host == "localhost" else host
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.bind((bind_host, port))
+        return True
+    except OSError:
+        return False
 
 
 async def _run_doctor(args: argparse.Namespace) -> int:
