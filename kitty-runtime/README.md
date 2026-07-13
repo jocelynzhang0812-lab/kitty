@@ -11,14 +11,14 @@ Kitty Runtime 提供安全 Webhook、模型工具循环、会话 worker、持久
 ## 本地运行
 
 ```bash
-# Kitty requires Python 3.11+.
-# On macOS, install it first if `python3 --version` is still 3.9:
-# brew install python@3.12
-python3.12 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/pip install -r requirements.lock
-.venv/bin/pip install .
-.venv/bin/python -m kitty --once "hello"
+sh scripts/bootstrap-local.sh
+```
+
+如果脚本提示本机没有 Python 3.11+，macOS 先安装 Python 3.12：
+
+```bash
+brew install python@3.12
+KITTY_PYTHON="$(brew --prefix python@3.12)/bin/python3.12" sh scripts/bootstrap-local.sh
 ```
 
 ## 10 分钟上线
