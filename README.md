@@ -1,6 +1,9 @@
 # Kitty
 
-Kitty 是一个面向飞书的生产级 Agent，采用Server和Worker分离的架构，目标是稳定接收事件、调用工具、回复飞书，并且在生产环境里能扩容、恢复、审计和隔离风险。
+Kitty 是一个面向飞书的生产级 Agent，采用 Server 和 Worker 分离的架构，目标是稳定接收事件、调用工具、回复飞书，并且在生产环境里能扩容、恢复、审计和隔离风险。
+
+> 想最快跑通？直接跳到 [快速联调（不加密）](#快速联调不加密最小配置)。
+> 遇到报错？直接跳到 [故障排查](#故障排查)，里面覆盖了 400、doctor 报错、"暂时无法和机器人发消息"、模型 401 等常见坑。
 
 ## 架构总览
 
@@ -44,6 +47,29 @@ flowchart LR
 
 PostgreSQL 是生产协调层，负责 Inbox、Outbox、事件去重、会话历史、Session Lease 和 fencing token。`FOR UPDATE SKIP LOCKED` 用来让多个 Worker/Sender 安全并发领取任务。
 
+## 消息处理链路（联调时对着排查）
+
+一条飞书消息从进入到回复，会经过下面这些环节。**排障时先定位卡在哪一环**：
+
+```text
+飞书客户端发消息
+   │  ← 卡这里：飞书报"暂时无法和机器人发消息"（应用没发布 / 隧道断了 / 回调地址不通）
+   ▼
+公网隧道 (cloudflared 等)
+   │  ← 卡这里：隧道失效，URL 变了或进程挂了
+   ▼
+POST /feishu/events  (server.py)
+   │  ← 卡这里：返回 400（验签 / 解密 / token / 环境配置问题）
+   ▼
+FeishuEventParser 解析  (channels/feishu.py)
+   │
+   ▼
+SQLite Durable Queue → SessionWorker → AgentLoop
+   │  ← 卡这里：模型 API 报 401 / 模型名不存在，重试耗尽进 dead letter
+   ▼
+FeishuSender 回复飞书
+```
+
 ## 关键模块
 
 ```text
@@ -57,6 +83,8 @@ kitty-runtime/
 │   ├── distributed/       # server / worker / sender 三进程实现
 │   ├── hooks/             # 生命周期事件 HookBus
 │   ├── skills/            # SKILL.md 加载和选择
+│   ├── onboarding.py      # setup / doctor 的配置校验与连通性检查
+│   ├── deployment.py      # 环境变量装配与部署级校验
 │   ├── server.py          # 单进程 ASGI 飞书服务
 │   ├── runtime.py         # 运行时装配入口
 │   └── cli.py             # setup / doctor / serve / server / worker / sender
@@ -72,9 +100,9 @@ kitty-runtime/
 Kitty 内置飞书生产接入需要的基础能力：
 
 - Event v2.0 回调解析；
-- Verification Token 校验；
-- 飞书请求签名和时间戳校验；
-- Encrypt Key AES-256-CBC 解密；
+- Verification Token 校验（可选，配了才校验）；
+- 飞书请求签名和时间戳校验（配了 Encrypt Key 才校验）；
+- Encrypt Key AES-256-CBC 解密（可选）；
 - URL challenge 响应；
 - 单聊和群聊消息；
 - 群聊按 `@` 触发；
@@ -84,6 +112,188 @@ Kitty 内置飞书生产接入需要的基础能力：
 - 发送端稳定 `uuid`，避免重试导致重复消息；
 - 失败退避重试和 dead letter；
 - `/health` 和 `/ready` 探针。
+
+## 快速联调（不加密最小配置）
+
+这是最快跑通的路径：**只需要模型 API + 飞书 App ID/Secret**，不配 Verification Token / Encrypt Key，用 `development` 环境跳过一切签名与 token 校验。适合本地联调，**不适合正式上线**（见 [走向生产](#走向生产)）。
+
+### 1. 拉代码 & 建虚拟环境
+
+```bash
+git clone https://github.com/jocelynzhang0812-lab/kitty.git
+cd kitty/kitty-runtime
+sh scripts/bootstrap-local.sh
+```
+
+如果提示本机没有 Python 3.11+，macOS 先装 Python 3.12：
+
+```bash
+brew install python@3.12
+KITTY_PYTHON="$(brew --prefix python@3.12)/bin/python3.12" sh scripts/bootstrap-local.sh
+```
+
+> **⚠️ 强烈建议用 editable 方式安装**，否则你改了源码不会生效（`.venv` 里跑的是 site-packages 的旧副本）：
+>
+> ```bash
+> .venv/bin/pip install -e .
+> ```
+>
+> 判断是否 editable：`.venv/lib/python*/site-packages/` 下如果有 `kitty/` 实体目录而不是 `__editable__*.pth`，说明是非 editable 安装，改源码不生效。
+
+### 2. 写最小 `.env`
+
+在 **`kitty-runtime/` 目录下**新建一个 `.env`（下面的 `serve --env-file .env` 用的是相对路径，务必在这个目录里执行；不确定时先 `pwd` 确认）：
+
+```bash
+# 关键：用 development，避免 production 强制要求加密字段
+KITTY_ENV=development
+KITTY_BOT_NAME=团队助手
+KITTY_SYSTEM_PROMPT=You are a helpful internal Feishu assistant.
+KITTY_MODEL_PROVIDER=openai_compatible
+KITTY_PUBLIC_BASE_URL=https://你的隧道域名        # 见第 4 步
+
+# 模型（以 DeepSeek 为例；模型名要用官方存在的，如 deepseek-chat）
+LLM_API_KEY=sk-你的有效key
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-chat
+
+# 飞书（只需要这两个）
+FEISHU_APP_ID=cli_你的app_id
+FEISHU_APP_SECRET=你的app_secret
+FEISHU_REQUIRE_MENTION=1        # 群聊必须 @ 才响应；单聊不受影响
+
+# 不加密联调：以下两项留空/不写即可（服务端会跳过签名与 token 校验）
+# FEISHU_VERIFICATION_TOKEN=
+# FEISHU_ENCRYPT_KEY=
+```
+
+> 也可以用交互式向导 `.venv/bin/kitty setup` 生成 `.env`，但注意**网页版向导默认按「生产配置」校验**，会要求你填公网地址、Encrypt Key、Verification Token。想走不加密最小路径，直接手写上面的 `.env` 更省事。
+
+### 3. 检查配置
+
+```bash
+.venv/bin/kitty doctor --env-file .env --live
+```
+
+`doctor` 会依次检查：配置完整性、持久化目录、扩展模块、**模型连接（真打一次模型接口）**、**飞书连接（用 app id/secret 换 token）**。全绿显示 `READY` 再继续。
+
+### 4. 起服务 + 公网隧道
+
+飞书回调必须是公网 HTTPS。本地联调可以用 cloudflared 临时隧道：
+
+```bash
+# 终端 A：起服务
+.venv/bin/kitty serve --env-file .env --host 0.0.0.0 --port 8000
+
+# 终端 B：起隧道，会打印一个 https://xxxx.trycloudflare.com
+cloudflared tunnel --url http://localhost:8000
+```
+
+把隧道打印出的 HTTPS 地址填回 `.env` 的 `KITTY_PUBLIC_BASE_URL`（改完 **重启 serve** 才生效）。
+
+> **隧道是临时的**：`trycloudflare` 每次重启 URL 都会变，进程一关就失效。联调期间别关终端 B。URL 变了要同步更新两处：`.env` 的 `KITTY_PUBLIC_BASE_URL` + 飞书后台回调地址。
+
+### 5. 配置飞书开发者后台
+
+在 [飞书开放平台](https://open.feishu.cn/) 你的企业自建应用里：
+
+1. **应用能力**：添加「机器人」能力；
+2. **事件订阅**：
+   - 方式选「**将事件发送至开发者服务器**」（不是长连接）；
+   - 回调地址填 `https://你的隧道域名/feishu/events`，保存时确认 **challenge 校验通过**；
+   - **加密策略（Encrypt Key）保持清空**（对应上面不加密的配置）；
+   - 订阅 `im.message.receive_v1`（接收消息）事件；
+3. **版本管理与发布**：创建版本并**发布上线**，否则机器人不可用（会报"暂时无法和机器人发消息"）。
+
+### 6. 逐项验证
+
+1. 飞书后台保存事件订阅 URL，challenge 通过；
+2. 单聊发一条文本，机器人回复；
+3. 群聊不 `@` 不回复；
+4. 群聊 `@` 后回复；
+5. 重启进程后再发消息，确认会话历史仍在；
+6. 如开启图片，发送图片确认 `image_key` 进入工具/Hook；
+7. 如开启卡片，点击按钮确认 `card.action.trigger` 走同一条链路。
+
+完整流程另见：
+
+- [10 分钟上线指南](kitty-runtime/docs/ten-minute-launch.md)
+- [飞书生产部署指南](kitty-runtime/docs/production-deployment.md)
+- [分布式部署指南](kitty-runtime/docs/distributed-deployment.md)
+
+## FAQ
+
+### `/feishu/events` 返回 400 Bad Request
+
+400 **只**在事件的「验签 / 解密 / token / JSON 解析」阶段失败时返回，跟你的机器人业务逻辑无关。**真正的原因写在 400 响应的 body 里**（`{"ok": false, "error": "..."}`），但 uvicorn 的 access log 只打状态码，看不到。先拿到 error 文案：
+
+```bash
+# 到飞书后台"事件订阅"页看响应内容，或本地自测：
+curl -i -X POST http://127.0.0.1:8000/feishu/events \
+  -H "Content-Type: application/json" -d '{"hello":"world"}'
+```
+
+对照下表定位：
+
+| error 文案 | 原因 | 修复 |
+| --- | --- | --- |
+| `encrypted Feishu event received without FEISHU_ENCRYPT_KEY` | 飞书后台**开了加密**，但服务端没配 `FEISHU_ENCRYPT_KEY` | 飞书后台清空 Encrypt Key（不加密），或服务端补上 key |
+| `invalid Feishu request signature` | 配了 `FEISHU_ENCRYPT_KEY` 但与飞书后台不一致 | 两边 Encrypt Key 完全一致，或都不用 |
+| `invalid Feishu verification token` | `FEISHU_VERIFICATION_TOKEN` 与飞书后台不一致 | 复制飞书后台的 token 覆盖，或不配 |
+| `missing Feishu signature headers` | 配了 Encrypt Key，但请求没带 `x-lark-*` 头（常见于代理丢头） | 反向代理透传 `x-lark-signature/timestamp/nonce` |
+| `stale Feishu request timestamp` | 服务器时钟与飞书偏差超过 300s | NTP 同步时间 |
+| `Feishu body must be valid JSON` | 网关篡改了 body，或不是飞书发来的请求 | 检查中间层 |
+
+**最常见**：飞书后台开了加密而服务端没配（或两边 key 不一致）。不加密联调时，**飞书后台 Encrypt Key 必须清空**。
+
+### doctor 报「缺少 xxx」但 serve 却能起来
+
+这是设计上的**两套校验**：
+
+- `serve` 用 [`deployment.py`](kitty-runtime/kitty/deployment.py) 校验，**只有 `KITTY_ENV=production` 才强制要求** Encrypt Key / Verification Token / 公网地址；`development` 下这些都是可选。
+- `doctor` / 网页 `setup` 用 [`onboarding.py`](kitty-runtime/kitty/onboarding.py) 校验；网页版「保存生产配置」固定按 production 走，所以会要求加密字段和公网 HTTPS 地址。
+
+**结论**：不加密联调请用 `KITTY_ENV=development` + 命令行 `doctor`/`serve`，不要走网页版「保存生产配置」。
+
+### 改了源码不生效
+
+`.venv` 若是用 `pip install .`（非 editable）装的，运行时加载的是 site-packages 里的副本，改源码目录无效。改成 editable：
+
+```bash
+cd kitty-runtime && .venv/bin/pip install -e .
+```
+
+### 飞书报「暂时无法和机器人发消息」
+
+这是**飞书客户端侧**提示，通常请求还没走到你的服务。**分水岭：看 `serve` 终端发消息时有没有新日志**：
+
+- **有** `POST /feishu/events` → 链路通了，去查后面的处理/回复环节；
+- **完全没有** → 问题在飞书后台或隧道：
+  1. 机器人能力没加 / **应用没发布**；
+  2. 事件订阅没选「发送至开发者服务器」或没订阅 `im.message.receive_v1`；
+  3. 隧道断了 / URL 变了（先 `curl https://隧道域名/health` 确认，正常返回 `{"ok": true, "status": "alive"}`）；
+  4. 回调地址保存时 challenge 没通过。
+
+### 模型报 401 / 模型不回复
+
+`serve` 日志出现：
+
+```text
+Feishu delivery retry ... error=RuntimeError: model API returned HTTP 401:
+  {"error":{"message":"Authentication Fails, Your api key: ****xxxx is invalid", ...}}
+Feishu delivery exhausted retries ...
+```
+
+说明**飞书链路完全正常**，只是模型认证失败：
+
+- **401 invalid api key**：`LLM_API_KEY` 无效/过期/复制截断 → 换有效 key；
+- **model not found / 模型名报错**：`LLM_MODEL` 填了不存在的名字。DeepSeek 正确名是 `deepseek-chat`（V3）或 `deepseek-reasoner`（R1），没有 `deepseek-v4-flash` 这类；
+- 改完 `.env` 后 **重启 serve**。注意：之前重试耗尽的消息已进 dead letter 不会自动重发，**发一条新消息**测试即可。
+
+### 其它提醒
+
+- **`.env` 改动必须重启 `serve` 才生效**；隧道进程与服务进程是两个，别混。
+- `--env-file .env` 是相对路径，要在 `.env` 所在目录执行，或改成绝对路径。
 
 ## 工具和沙箱
 
@@ -146,108 +356,61 @@ KITTY_TOOL_CONTAINER_TMPFS_SIZE=64m
 
 使用 `subprocess` 或 `container` 时，工具 handler 必须是可导入函数。lambda 或闭包需要显式提供 `handler_ref="module:function"`。
 
-## 和 OpenClaw 相比
+## 环境变量
 
-| 维度 | Kitty | OpenClaw |
-| --- | --- | --- |
-| 产品定位 | 飞书优先的生产级 Agent Runtime | 多渠道个人 AI assistant  |
-| 接入面 | 专注飞书 Webhook、卡片、图片、发送幂等 | 覆盖大量聊天渠道，Feishu 是其中之一 |
-| 上线复杂度 | 少量 Python 配置；`setup` / `doctor` / `serve` 面向飞书联调 | 功能更全，但 Gateway、channel、skills、daemon 配置面更大 |
-| 生产队列 | 内置 SQLite durable queue；分布式模式用 PostgreSQL Inbox / Outbox | 更偏个人 Gateway 和多渠道事件分发 |
-| 横向扩容 | Server / Worker / Sender 三角色可独立扩容 | 重点是本地/自托管 personal assistant，扩容不是 Feishu 接入的主路径 |
-| 会话一致性 | PostgreSQL Session Lease + fencing token | 依赖 OpenClaw 自身 session / sandbox / agent routing 体系 |
-| 密钥边界 | Server、Worker、Sender 三角色 env 分离 | 多渠道统一 Gateway 配置，能力更广但边界更复杂 |
-| 工具安全 | in-process / subprocess / Docker container 三档 | OpenClaw 有 sandbox 体系，生态更大，默认/策略需按 channel 和 agent 配置 |
-| 适合场景 | 企业自建飞书 Agent、客服/运营/内部助手、需要稳定回调和队列恢复 | 个人全能助理、多渠道自动化、桌面/移动 companion 体验 |
-
-Kitty 的主要优势：
-
-1. **飞书路径更短。** Kitty 的主链路就是 `Feishu -> Server -> Worker -> Sender -> Feishu`，不需要先理解一个多渠道 Gateway 生态。
-2. **生产失败模型更清晰。** 入站事件先落 Inbox，模型运行后写 Outbox，发送失败只重试 Sender，不会重新跑 Agent。
-3. **Worker 可以真正独立扩容。** 多个 Worker 通过 PostgreSQL 领取任务，同一会话由 Session Lease 串行保护，不同会话可以并发。
-4. **密钥暴露面更小。** Server 不需要模型密钥，Worker 不需要飞书 App Secret，Sender 不需要模型密钥。
-5. **飞书联调更直接。** `setup` 生成回调地址，`doctor --live` 同时检测模型和飞书凭据，`/ready` 可用于部署探针。
-6. **工具隔离是运行时一等能力。** 生产 Worker 可以把工具放到子进程或 Docker 容器中，便于限制超时、输出和系统权限。
-
-Kitty 的劣势也很明确：
-
-- 不提供 OpenClaw 那样的多渠道生态；
-- 没有 companion app、voice、Canvas、ClawHub 这类成熟体验；
-- 内置工具数量少，需要你按业务自己写 Python tools；
-- container sandbox 是工具级隔离，不是完整多租户安全平台；
-- 如果你要做个人全能助理，OpenClaw 的现成能力更丰富。
-
-简单判断：
-
-- **只做飞书企业自建 Agent：优先 Kitty。**
-- **要一个跨很多聊天软件的个人助理：优先 OpenClaw。**
-- **要把 OpenClaw 的 Agent 能力包装进飞书生产服务：可以用 Kitty 做飞书入口和生产队列，用工具调用去桥接外部 Agent。**
-
-## 10 分钟联调
-
-本地准备：
-
-```bash
-git clone https://github.com/jocelynzhang0812-lab/kitty.git
-cd kitty/kitty-runtime
-sh scripts/bootstrap-local.sh
-```
-
-如果脚本提示本机没有 Python 3.11+，macOS 先安装 Python 3.12：
-
-```bash
-brew install python@3.12
-KITTY_PYTHON="$(brew --prefix python@3.12)/bin/python3.12" sh scripts/bootstrap-local.sh
-```
-
-启动配置向导：
-
-```bash
-.venv/bin/kitty setup
-```
-
-向导会让你填写：
-
-- 机器人名称和系统提示词；
-- OpenAI-compatible 模型地址、模型名和 API Key；
-- 飞书 App ID / App Secret；
-- Verification Token / Encrypt Key；
-- 公网 HTTPS base URL；
-- 可选的 Tools 和 Hooks。
-
-检查配置：
-
-```bash
-.venv/bin/kitty doctor --env-file .env --live
-```
-
-启动单进程服务：
-
-```bash
-.venv/bin/kitty serve --env-file .env --host 0.0.0.0 --port 8000
-```
-
-飞书事件订阅地址：
+### 最小联调配置（不加密）
 
 ```text
-https://你的域名/feishu/events
+KITTY_ENV=development
+KITTY_BOT_NAME=Team Assistant
+KITTY_SYSTEM_PROMPT=You are a helpful Feishu assistant.
+KITTY_PUBLIC_BASE_URL=https://你的隧道域名
+
+LLM_API_KEY=...
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-chat
+
+FEISHU_APP_ID=...
+FEISHU_APP_SECRET=...
+FEISHU_REQUIRE_MENTION=1
 ```
 
-联调时建议先测：
+### 生产完整配置
 
-1. 飞书保存事件订阅 URL，确认 challenge 通过；
-2. 单聊发送一条文本，确认机器人回复；
-3. 群聊不 `@` 不回复；
-4. 群聊 `@` 后回复；
-5. 重启进程后再发消息，确认会话历史仍在；
-6. 如果开启图片，发送图片消息确认 `image_key` 能进入工具/Hook；
-7. 如果开启卡片，点击按钮确认 `card.action.trigger` 能走同一条链路。
+```text
+KITTY_ENV=production
+KITTY_BOT_NAME=Team Assistant
+KITTY_SYSTEM_PROMPT=You are a helpful Feishu assistant.
+KITTY_PUBLIC_BASE_URL=https://稳定域名
 
-完整流程见：
+LLM_API_KEY=...
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=...
+LLM_TIMEOUT_SECONDS=120
 
-- [10 分钟上线指南](kitty-runtime/docs/ten-minute-launch.md)
-- [飞书生产部署指南](kitty-runtime/docs/production-deployment.md)
-- [分布式部署指南](kitty-runtime/docs/distributed-deployment.md)
+FEISHU_APP_ID=...
+FEISHU_APP_SECRET=...
+FEISHU_VERIFICATION_TOKEN=...   # production 必填
+FEISHU_ENCRYPT_KEY=...          # production 必填，与飞书后台一致
+FEISHU_REQUIRE_MENTION=1
+FEISHU_ACCEPT_IMAGES=0
+
+KITTY_TOOL_MODULES=examples.tools
+KITTY_HOOK_PATHS=
+KITTY_TOOL_EXECUTOR=subprocess
+KITTY_TOOL_DENYLIST=
+KITTY_TOOL_MAX_OUTPUT_BYTES=65536
+```
+
+## 走向生产
+
+联调用的不加密 + 临时隧道**只适合本地**：不加密 + 不校验 token 意味着任何知道回调 URL 的人都能伪造飞书事件。上线时建议：
+
+1. **开启加密与校验**：飞书后台配置 Encrypt Key + Verification Token，`.env` 两边配齐，`KITTY_ENV=production`；
+2. **换固定公网域名**：用稳定 HTTPS 域名替代 `trycloudflare` 临时隧道；
+3. **轮换联调期暴露过的密钥**：`LLM_API_KEY`、`FEISHU_APP_SECRET` 等；
+4. **按需上分布式**：流量大时用 `server` / `worker` / `sender` 三角色独立扩容；
+5. **工具隔离**：`KITTY_TOOL_EXECUTOR=subprocess` 或 `container`。
 
 ## 分布式部署
 
@@ -287,32 +450,6 @@ docker compose -f docker-compose.distributed.yml up -d \
 KITTY_DATABASE_URL=postgresql://... kitty jobs
 KITTY_DATABASE_URL=postgresql://... kitty retry-job inbox JOB_ID
 KITTY_DATABASE_URL=postgresql://... kitty retry-job outbox JOB_ID
-```
-
-## 常用环境变量
-
-```text
-KITTY_ENV=production
-KITTY_BOT_NAME=Team Assistant
-KITTY_SYSTEM_PROMPT=You are a helpful Feishu assistant.
-
-LLM_API_KEY=...
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_MODEL=...
-LLM_TIMEOUT_SECONDS=120
-
-FEISHU_APP_ID=...
-FEISHU_APP_SECRET=...
-FEISHU_VERIFICATION_TOKEN=...
-FEISHU_ENCRYPT_KEY=...
-FEISHU_REQUIRE_MENTION=1
-FEISHU_ACCEPT_IMAGES=0
-
-KITTY_TOOL_MODULES=examples.tools
-KITTY_HOOK_PATHS=
-KITTY_TOOL_EXECUTOR=subprocess
-KITTY_TOOL_DENYLIST=
-KITTY_TOOL_MAX_OUTPUT_BYTES=65536
 ```
 
 ## 测试
